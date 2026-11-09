@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -22,6 +23,8 @@
 #define TAG "PhoneAvBoard"
 
 namespace {
+
+bool PhoneAvNetworkReady();
 
 std::string PhoneAvUrl(const char* path) {
     return std::string("http://") + PHONE_AV_HOST + ":" + std::to_string(PHONE_AV_PORT) + path;
@@ -151,6 +154,13 @@ private:
         uint8_t pending = 0;
 
         while (running_) {
+            while (running_ && !PhoneAvNetworkReady()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
+            if (!running_) {
+                break;
+            }
+
             auto network = Board::GetInstance().GetNetwork();
             auto http = network->CreateHttp(0);
             if (auto opened = http->Open("GET", url); !opened) {
@@ -168,7 +178,7 @@ private:
             }
 
             pending_valid = false;
-            while (running_) {
+            while (running_ && PhoneAvNetworkReady()) {
                 auto ret = http->Read(reinterpret_cast<char*>(raw), sizeof(raw));
                 if (!ret) {
                     ESP_LOGW(TAG, "Phone microphone stream read failed");
@@ -186,6 +196,9 @@ private:
     }
 
     bool PostPcm(const std::string& url, const int16_t* data, std::size_t samples) {
+        if (!PhoneAvNetworkReady()) {
+            return false;
+        }
         auto network = Board::GetInstance().GetNetwork();
         auto http = network->CreateHttp(0);
         std::string body(reinterpret_cast<const char*>(data), samples * sizeof(int16_t));
@@ -205,6 +218,10 @@ private:
         const std::string url = PhoneAvUrl(PHONE_AV_SPEAKER_PATH);
         int16_t chunk[kPostSamples];
         while (running_) {
+            if (!PhoneAvNetworkReady()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                continue;
+            }
             std::size_t count = speaker_buffer_.Pop(chunk, kPostSamples);
             if (count == 0) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -231,6 +248,9 @@ public:
     }
 
     virtual bool Capture() override {
+        if (!PhoneAvNetworkReady()) {
+            return false;
+        }
         auto network = Board::GetInstance().GetNetwork();
         auto http = network->CreateHttp(0);
         const std::string url = PhoneAvUrl(PHONE_AV_SNAPSHOT_PATH);
@@ -271,6 +291,9 @@ public:
     }
 
     virtual std::expected<std::string, std::string> Explain(const std::string& question) override {
+        if (!PhoneAvNetworkReady()) {
+            return std::unexpected(std::string("Network not connected"));
+        }
         std::string jpeg;
         std::string url;
         std::string token;
@@ -331,6 +354,20 @@ private:
 
 class PhoneAvBoard : public WifiBoard {
 public:
+    virtual void SetNetworkEventCallback(NetworkEventCallback callback) override {
+        user_network_event_callback_ = std::move(callback);
+        WifiBoard::SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+            network_ready_ = (event == NetworkEvent::Connected);
+            if (user_network_event_callback_) {
+                user_network_event_callback_(event, data);
+            }
+        });
+    }
+
+    bool IsNetworkReady() const {
+        return network_ready_.load();
+    }
+
     virtual AudioCodec* GetAudioCodec() override {
         static NetworkAudioCodec codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE);
         return &codec;
@@ -340,7 +377,15 @@ public:
         static NetworkCamera camera;
         return &camera;
     }
+
+private:
+    std::atomic<bool> network_ready_{false};
+    NetworkEventCallback user_network_event_callback_;
 };
+
+bool PhoneAvNetworkReady() {
+    return static_cast<PhoneAvBoard&>(Board::GetInstance()).IsNetworkReady();
+}
 
 }  // namespace
 
