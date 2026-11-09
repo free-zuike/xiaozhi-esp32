@@ -111,7 +111,9 @@ esp_err_t PhoneAvConfigSetHandler(httpd_req_t* req) {
     char body[256] = {0};
     int received = httpd_req_recv(req, body, static_cast<size_t>(sizeof(body) - 1));
     if (received < 0) {
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR);
+        const std::string page = PhoneAvConfigPage("读取请求失败，请重试");
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
         return ESP_FAIL;
     }
     body[received] = '\0';
