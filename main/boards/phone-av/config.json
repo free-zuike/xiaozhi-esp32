@@ -1,0 +1,10 @@
+{
+    "type": "phone-av",
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "phone-av",
+            "sdkconfig_append": []
+        }
+    ]
+}
