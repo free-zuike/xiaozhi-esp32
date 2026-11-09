@@ -49,22 +49,6 @@ jobs:
           python scripts/build.py "$BOARD" --name "$VARIANT"
           test -s build/merged-binary.bin
 
-      - name: Decode WiFi panic
-        shell: bash
-        run: |
-          source "$IDF_PATH/export.sh"
-          ELF=$(find build -maxdepth 1 -name '*.elf' -print -quit)
-          test -n "$ELF"
-          ADDR2LINE=$(command -v xtensa-esp32s3-elf-addr2line || true)
-          if [ -z "$ADDR2LINE" ]; then ADDR2LINE=$(command -v xtensa-esp-elf-addr2line); fi
-          echo "ELF=$ELF"
-          echo "ADDR2LINE=$ADDR2LINE"
-          printf '%s\n' \
-            0x420af12f 0x420af209 0x420aef3c 0x420af2f4 \
-            0x42023c0e 0x42023c5d 0x42011ef8 0x4201df0b \
-            0x4215c5ee 0x42019487 0x4201a94e 0x4201a96e \
-            | "$ADDR2LINE" -pfiaC -e "$ELF" | tee panic_decoded.txt
-
       - name: Package merged binary
         shell: bash
         env:
@@ -79,14 +63,6 @@ jobs:
         with:
           name: firmware-${{ inputs.board || 'bread-compact-wifi' }}
           path: dist/*
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: panic-decode-${{ github.sha }}
-          path: |
-            build/*.elf
-            panic_decoded.txt
           if-no-files-found: error
 
   release:

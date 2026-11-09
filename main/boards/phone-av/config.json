@@ -4,7 +4,12 @@
     "builds": [
         {
             "name": "phone-av",
-            "sdkconfig_append": []
+            "sdkconfig_append": [
+                "CONFIG_FLASH_DEFAULT_ASSETS=n",
+                "CONFIG_FLASH_CUSTOM_ASSETS=n",
+                "CONFIG_FLASH_EXPRESSION_ASSETS=n",
+                "CONFIG_FLASH_NONE_ASSETS=y"
+            ]
         }
     ]
 }
