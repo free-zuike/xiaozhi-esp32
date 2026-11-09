@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -14,11 +13,12 @@
 #include <functional>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
 #include <esp_log.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #define TAG "PhoneAvBoard"
 
@@ -93,9 +93,13 @@ public:
             return;
         }
         running_ = true;
-        std::thread(&NetworkAudioCodec::MicTask, this).detach();
-        std::thread(&NetworkAudioCodec::SpeakerTask, this).detach();
-        ESP_LOGI(TAG, "phone-av network audio tasks started");
+        BaseType_t mic_result = xTaskCreate(MicTaskEntry, "phone_av_mic", 8192, this, 5, nullptr);
+        BaseType_t speaker_result = xTaskCreate(SpeakerTaskEntry, "phone_av_spk", 8192, this, 5, nullptr);
+        if (mic_result != pdPASS || speaker_result != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create phone-av network audio tasks");
+        } else {
+            ESP_LOGI(TAG, "phone-av network audio tasks started");
+        }
     }
 
 protected:
@@ -123,6 +127,18 @@ private:
     static constexpr std::size_t kBufferSamples = 16000;
     static constexpr std::size_t kHttpReadSize = 1024;
     static constexpr std::size_t kPostSamples = 320;
+
+    static void MicTaskEntry(void* arg) {
+        auto* codec = static_cast<NetworkAudioCodec*>(arg);
+        codec->MicTask();
+        vTaskDelete(nullptr);
+    }
+
+    static void SpeakerTaskEntry(void* arg) {
+        auto* codec = static_cast<NetworkAudioCodec*>(arg);
+        codec->SpeakerTask();
+        vTaskDelete(nullptr);
+    }
 
     void PushAudioBytes(const uint8_t* data, std::size_t len, bool& pending_valid, uint8_t& pending) {
         int16_t samples[kHttpReadSize / 2];
@@ -155,7 +171,7 @@ private:
 
         while (running_) {
             while (running_ && !PhoneAvNetworkReady()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                vTaskDelay(pdMS_TO_TICKS(500));
             }
             if (!running_) {
                 break;
@@ -166,14 +182,14 @@ private:
             if (auto opened = http->Open("GET", url); !opened) {
                 ESP_LOGW(TAG, "Failed to open phone microphone stream");
                 http->Close();
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                vTaskDelay(pdMS_TO_TICKS(1000));
                 continue;
             }
             auto status = http->GetStatusCode();
             if (!status || *status != 200) {
                 ESP_LOGW(TAG, "Phone microphone stream rejected the request");
                 http->Close();
-                std::this_thread::sleep_for(std::chrono::seconds(1));
+                vTaskDelay(pdMS_TO_TICKS(1000));
                 continue;
             }
 
@@ -191,7 +207,7 @@ private:
                 PushAudioBytes(raw, static_cast<std::size_t>(n), pending_valid, pending);
             }
             http->Close();
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            vTaskDelay(pdMS_TO_TICKS(200));
         }
     }
 
@@ -219,16 +235,16 @@ private:
         int16_t chunk[kPostSamples];
         while (running_) {
             if (!PhoneAvNetworkReady()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                vTaskDelay(pdMS_TO_TICKS(500));
                 continue;
             }
             std::size_t count = speaker_buffer_.Pop(chunk, kPostSamples);
             if (count == 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
             if (!PostPcm(url, chunk, count)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                vTaskDelay(pdMS_TO_TICKS(100));
             }
         }
     }
