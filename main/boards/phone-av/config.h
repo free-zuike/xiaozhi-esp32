@@ -8,8 +8,12 @@
 #define AUDIO_INPUT_SAMPLE_RATE  16000
 #define AUDIO_OUTPUT_SAMPLE_RATE 16000
 
-/* android-ip-camera HTTP server. 192.168.4.2 is the usual DHCP lease when
- * the phone joins the ESP32 AP; change to the phone's IP on a home router.
+/* android-ip-camera HTTP server. This is only the factory default: the live
+ * phone address is kept in NVS (namespace "phone_av", key "host") and can be
+ * changed at runtime from the board's LAN config page:
+ *     http://<board-ip>:8080/
+ * No rebuild or reflash is needed when the phone's LAN IP changes.
+ * 192.168.4.2 is the usual DHCP lease when the phone joins the ESP32 AP.
  * For the LAN profile, disable TLS and Basic Auth in the App settings. */
 #define PHONE_AV_HOST "192.168.4.2"
 #define PHONE_AV_PORT 4444

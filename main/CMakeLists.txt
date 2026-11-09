@@ -1098,6 +1098,11 @@ if(CONFIG_IDF_TARGET_ESP32S3)
 endif()
 
 set(MAIN_PRIV_REQUIRES_EXTRA "")
+# phone-av hosts a small LAN config page so the phone address can be changed
+# at runtime without rebuilding or reflashing the firmware.
+if(CONFIG_BOARD_TYPE_PHONE_AV)
+    list(APPEND MAIN_PRIV_REQUIRES_EXTRA esp_http_server)
+endif()
 if(CONFIG_XIAOZHI_NETWORK_ETHERNET AND CONFIG_XIAOZHI_ETH_PHY_IP101)
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA espressif__ip101)
 endif()
