@@ -1,0 +1,91 @@
+name: Build One Board (no local ESP-IDF)
+
+# Dedicated single-board build. The upstream build.yml expands the FULL
+# 171+ variant matrix on workflow_dispatch, which is wasteful on a fork.
+on:
+  workflow_dispatch:
+    inputs:
+      board:
+        description: 'Board directory under main/boards (change to phone-av once that board exists)'
+        required: true
+        default: 'bread-compact-wifi'
+      variant:
+        description: 'Build name from that board config.json'
+        required: true
+        default: 'bread-compact-wifi'
+      publish_release:
+        description: 'Attach firmware to a GitHub Release'
+        type: boolean
+        required: true
+        default: false
+      release_tag:
+        description: 'Release tag (used when publish_release is true)'
+        required: false
+        default: 'ci-firmware'
+  push:
+    branches:
+      - 'ci/phone-av'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ inputs.board || 'bread-compact-wifi' }}
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build firmware
+        shell: bash
+        env:
+          BOARD: ${{ inputs.board || 'bread-compact-wifi' }}
+          VARIANT: ${{ inputs.variant || 'bread-compact-wifi' }}
+        run: |
+          source "$IDF_PATH/export.sh"
+          idf.py --version
+          python scripts/build.py "$BOARD" --name "$VARIANT"
+          test -s build/merged-binary.bin
+
+      - name: Package merged binary
+        shell: bash
+        env:
+          BOARD: ${{ inputs.board || 'bread-compact-wifi' }}
+          SHA: ${{ github.sha }}
+        run: |
+          mkdir -p dist
+          cp build/merged-binary.bin "dist/${BOARD}_${SHA}.bin"
+          sha256sum dist/*.bin > dist/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: firmware-${{ inputs.board || 'bread-compact-wifi' }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish firmware to Release
+    needs: build
+    if: ${{ inputs.publish_release }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: firmware-${{ inputs.board || 'bread-compact-wifi' }}
+          path: dist
+
+      - name: Create or update release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag || 'ci-firmware' }}
+          SHA: ${{ github.sha }}
+        run: |
+          gh release create "$TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --title "Firmware $TAG" \
+            --notes "Built by GitHub Actions from $SHA" \
+            || gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
