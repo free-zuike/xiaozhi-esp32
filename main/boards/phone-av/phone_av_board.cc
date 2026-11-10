@@ -372,7 +372,7 @@ private:
                 continue;
             }
 
-            p        pending_valid = false;
+            pending_valid = false;
             zero_read_count_ = 0;
             while (running_ && PhoneAvNetworkReady()) {
                 // Keep the WiFi modem fully awake while the phone's upstream mic stream is
