@@ -262,7 +262,7 @@ public:
         }
     }
 
-protected:
+public:
     virtual int Read(int16_t* dest, int samples) override {
         if (dest == nullptr || samples <= 0) {
             return 0;
