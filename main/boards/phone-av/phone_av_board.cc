@@ -372,6 +372,7 @@ private:
             }
 
             pending_valid = false;
+            zero_read_count_ = 0;
             while (running_ && PhoneAvNetworkReady()) {
                 auto ret = http->Read(reinterpret_cast<char*>(raw), sizeof(raw));
                 if (!ret) {
@@ -380,8 +381,17 @@ private:
                 }
                 int n = *ret;
                 if (n == 0) {
-                    break;
+                    // A zero-length read can be a transient gap in the phone's stream (or a
+                    // spurious EOF) rather than a genuine close. Keep the connection open and
+                    // retry instead of tearing it down — a real close is still detected because
+                    // the socket read keeps returning 0 and we eventually bail out.
+                    if (++zero_read_count_ > 200) {
+                        break;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(5));
+                    continue;
                 }
+                zero_read_count_ = 0;
                 PushAudioBytes(raw, static_cast<std::size_t>(n), pending_valid, pending);
             }
             http->Close();
@@ -432,6 +442,7 @@ private:
     std::atomic<bool> started_{false};
     std::atomic<bool> running_{false};
     TickType_t last_read_tick_{0};
+    int zero_read_count_ = 0;
 };
 
 class NetworkCamera : public Camera {
