@@ -310,7 +310,12 @@ protected:
         AudioCodec::EnableOutput(false);
     }
 
-private:
+    // True once the phone's upstream microphone stream is actually open. The
+    // auto-listen logic uses this to avoid entering a chat session (and blinking
+    // the LED) when the phone app that provides the mic/speaker is not running.
+    bool IsPhoneMicConnected() const { return mic_connected_; }
+
+    private:
     static constexpr std::size_t kBufferSamples = 16000;
     static constexpr std::size_t kHttpReadSize = 1024;
     static constexpr std::size_t kPostSamples = 320;
@@ -380,6 +385,7 @@ private:
                 continue;
             }
 
+            mic_connected_ = true;
             pending_valid = false;
             zero_read_count_ = 0;
             while (running_ && PhoneAvNetworkReady()) {
@@ -412,6 +418,7 @@ private:
                 PushAudioBytes(raw, static_cast<std::size_t>(n), pending_valid, pending);
             }
             http->Close();
+            mic_connected_ = false;
             vTaskDelay(pdMS_TO_TICKS(200));
         }
     }
@@ -460,7 +467,8 @@ private:
     std::atomic<bool> running_{false};
     TickType_t last_read_tick_{0};
     int zero_read_count_ = 0;
-};
+    std::atomic<bool> mic_connected_{false};
+    };
 
 class NetworkCamera : public Camera {
 public:
@@ -605,13 +613,21 @@ public:
                                      IP2STR(&info.ip), IP2STR(&info.ip));
                         }
                     }
-                    // ManualStop keeps the conversation open across turns: the device does
-                    // not auto-stop after a reply, so the server does not send "goodbye"
-                    // and the audio channel stays open. The device therefore remains in the
-                    // listening state (solid green) instead of dropping to idle -> connecting.
+                    // Only start a conversation when the phone's microphone stream is
+                    // actually open. If the phone app is closed (or the host is wrong)
+                    // there is no audio device, so entering listening would immediately
+                    // fail and the device would blink forever in an idle<->listening loop.
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
-                        Application::GetInstance().SetListeningMode(kListeningModeManualStop);
-                        Application::GetInstance().ToggleChatState();
+                        auto* codec = static_cast<NetworkAudioCodec*>(board->GetAudioCodec());
+                        if (codec != nullptr && codec->IsPhoneMicConnected()) {
+                            // ManualStop keeps the conversation open across turns: the device
+                            // does not auto-stop after a reply, so the server does not send
+                            // "goodbye" and the audio channel stays open. The device therefore
+                            // remains in the listening state (solid green) instead of dropping
+                            // to idle -> connecting.
+                            Application::GetInstance().SetListeningMode(kListeningModeManualStop);
+                            Application::GetInstance().ToggleChatState();
+                        }
                     }
                 },
             .arg = this,
