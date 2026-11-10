@@ -22,6 +22,7 @@
 #include <vector>
 
 #include <esp_http_server.h>
+#include <esp_wifi.h>
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_system.h>
@@ -371,9 +372,16 @@ private:
                 continue;
             }
 
-            pending_valid = false;
+            p        pending_valid = false;
             zero_read_count_ = 0;
             while (running_ && PhoneAvNetworkReady()) {
+                // Keep the WiFi modem fully awake while the phone's upstream mic stream is
+                // active. If the radio is allowed to enter modem sleep the TCP flow stalls,
+                // the phone's send buffer fills, its writeChunk() times out and closes the
+                // socket, which used to trigger a tight reconnect storm (and the green LED
+                // blinking). This board is a tethered streaming device, so always-on WiFi is
+                // the right trade-off.
+                esp_wifi_set_ps(WIFI_PS_NONE);
                 auto ret = http->Read(reinterpret_cast<char*>(raw), sizeof(raw));
                 if (!ret) {
                     ESP_LOGW(TAG, "Phone microphone stream read failed");
@@ -381,11 +389,12 @@ private:
                 }
                 int n = *ret;
                 if (n == 0) {
-                    // A zero-length read can be a transient gap in the phone's stream (or a
-                    // spurious EOF) rather than a genuine close. Keep the connection open and
-                    // retry instead of tearing it down — a real close is still detected because
-                    // the socket read keeps returning 0 and we eventually bail out.
-                    if (++zero_read_count_ > 200) {
+                    // A zero-length read is a transient gap or silence from the phone, not
+                    // necessarily a closed socket. Keep the connection open and retry; a
+                    // genuine close is detected through the !ret path above. Only bail out
+                    // after a very long idle (dead / half-open socket) so we can recover.
+                    if (++zero_read_count_ > 10000) {
+                        ESP_LOGW(TAG, "Phone microphone stream idle too long, reconnecting");
                         break;
                     }
                     vTaskDelay(pdMS_TO_TICKS(5));
