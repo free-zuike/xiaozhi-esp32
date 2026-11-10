@@ -302,6 +302,14 @@ protected:
         return samples;
     }
 
+    // Audio for this board is streamed to the phone, not played on the on-board
+    // DAC. Force the local output off so the board's amplifier / power stage stays
+    // silent (no idle current noise / hum). The actual samples still reach the
+    // phone via SpeakerTask -> speaker_buffer_.
+    void EnableOutput(bool /*enable*/) override {
+        AudioCodec::EnableOutput(false);
+    }
+
 private:
     static constexpr std::size_t kBufferSamples = 16000;
     static constexpr std::size_t kHttpReadSize = 1024;
@@ -597,13 +605,13 @@ public:
                                      IP2STR(&info.ip), IP2STR(&info.ip));
                         }
                     }
-                    // Use continuous chat mode instead of AutoStop: with AutoStop the
-                    // server closes the audio channel (goodbye) after every reply, which
-                    // drops the device to idle -> connecting and makes the green LED blink
-                    // on each turn. Continuous mode keeps the session open, so the device
-                    // stays in the listening state (solid green) across turns.
+                    // ManualStop keeps the conversation open across turns: the device does
+                    // not auto-stop after a reply, so the server does not send "goodbye"
+                    // and the audio channel stays open. The device therefore remains in the
+                    // listening state (solid green) instead of dropping to idle -> connecting.
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
-                        Application::GetInstance().EnterChatState();
+                        Application::GetInstance().SetListeningMode(kListeningModeManualStop);
+                        Application::GetInstance().ToggleChatState();
                     }
                 },
             .arg = this,

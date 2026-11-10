@@ -97,6 +97,12 @@ public:
     void ToggleChatState();
 
     /**
+     * Set the listening mode (e.g. kListeningModeManualStop for an always-on,
+     * hands-free conversation). Exposed publicly so boards can pick their mode.
+     */
+    void SetListeningMode(ListeningMode mode);
+
+    /**
      * Start listening (event-based, thread-safe)
      * Sends MAIN_EVENT_START_LISTENING to be handled in Run()
      */
@@ -181,7 +187,7 @@ private:
     void CheckNewVersion();
     void InitializeProtocol();
     void ShowActivationCode(const std::string& code, const std::string& message);
-    void SetListeningMode(ListeningMode mode);
+    // SetListeningMode() is declared in the public section.
     ListeningMode GetDefaultListeningMode() const;
     
     // State change handler called by state machine
