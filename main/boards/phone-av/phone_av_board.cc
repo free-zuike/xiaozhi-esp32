@@ -266,6 +266,25 @@ protected:
         if (dest == nullptr || samples <= 0) {
             return 0;
         }
+        // Pace this read to the real audio rate. The upstream AudioService audio_input
+        // task calls Read() in a tight loop with no internal delay; for a real I2S mic the
+        // codec blocks until realtime samples arrive, which naturally paces the loop.
+        // Here the mic comes from the phone over HTTP and Pop() returns immediately, so
+        // without pacing the task spins at 100% CPU, floods the AFE feed ringbuffer
+        // ("AFE ringbuffer full"), triggers the task watchdog, and makes the AFE fall
+        // behind (encode queue overflow -> audio never reaches the server intact).
+        // Delaying to the realtime schedule keeps the pipeline at input_sample_rate and
+        // yields to other tasks.
+        const TickType_t now = xTaskGetTickCount();
+        if (last_read_tick_ != 0) {
+            const TickType_t expected =
+                last_read_tick_ + pdMS_TO_TICKS(samples * 1000 / input_sample_rate_);
+            if ((int32_t)(expected - now) > 0) {
+                vTaskDelay(expected - now);
+            }
+        }
+        last_read_tick_ = xTaskGetTickCount();
+
         std::size_t requested = static_cast<std::size_t>(samples);
         std::size_t got = mic_buffer_.Pop(dest, requested);
         if (got < requested) {
@@ -412,6 +431,7 @@ private:
     PcmRingBuffer speaker_buffer_;
     std::atomic<bool> started_{false};
     std::atomic<bool> running_{false};
+    TickType_t last_read_tick_{0};
 };
 
 class NetworkCamera : public Camera {
