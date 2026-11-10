@@ -586,8 +586,24 @@ public:
                     if (!board->IsNetworkReady()) {
                         return;
                     }
+                    // Surface the STA IP periodically so the phone-av config page
+                    // (http://<ip>:8080) can actually be reached to set Phone AV Host.
+                    static int tick = 0;
+                    if (++tick % 15 == 0) {
+                        esp_netif_t* netif = esp_netif_get_default_netif();
+                        esp_netif_ip_info_t info{};
+                        if (netif != nullptr && esp_netif_get_ip_info(netif, &info) == ESP_OK) {
+                            ESP_LOGI(TAG, "STA IP: " IPSTR " (config page: http://" IPSTR ":8080/)",
+                                     IP2STR(&info.ip), IP2STR(&info.ip));
+                        }
+                    }
+                    // Use continuous chat mode instead of AutoStop: with AutoStop the
+                    // server closes the audio channel (goodbye) after every reply, which
+                    // drops the device to idle -> connecting and makes the green LED blink
+                    // on each turn. Continuous mode keeps the session open, so the device
+                    // stays in the listening state (solid green) across turns.
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
-                        Application::GetInstance().ToggleChatState();
+                        Application::GetInstance().EnterChatState();
                     }
                 },
             .arg = this,
