@@ -18,8 +18,8 @@
 #define PHONE_AV_HOST "192.168.4.2"
 #define PHONE_AV_PORT 4444
 
-#define PHONE_AV_MIC_PATH      "/audio/pcm"
-#define PHONE_AV_SPEAKER_PATH "/audio/upload/16000"
+#define PHONE_AV_MIC_PATH      "/audio/raw"
+#define PHONE_AV_SPEAKER_PATH "/audio/upload"
 #define PHONE_AV_SNAPSHOT_PATH "/video/snapshot"
 
 #define BUILTIN_LED_GPIO GPIO_NUM_48
