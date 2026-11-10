@@ -4,6 +4,8 @@
 #include "config.h"
 #include "settings.h"
 #include "system_info.h"
+#include "application.h"
+#include <esp_timer.h>
 
 #include <algorithm>
 #include <atomic>
@@ -527,6 +529,36 @@ private:
 
 class PhoneAvBoard : public WifiBoard {
 public:
+    PhoneAvBoard() {
+        // This board ships without a wake-word model (the assets partition is
+        // disabled), so the default wake-word activation can never fire and the
+        // device would sit idle forever. Instead, once the device is online and
+        // activated, automatically start a hands-free conversation — no button
+        // needed. ToggleChatState() uses the default AutoStop mode, so after each
+        // reply the device returns to Listening and the chat stays alive. A slow
+        // periodic timer re-arms listening whenever the device is back to Idle
+        // (e.g. after a dropped connection), keeping the conversation going.
+        constexpr uint64_t kAutoListenIntervalUs = 1000000;  // 1 s
+        esp_timer_create_args_t auto_listen_timer_args = {
+            .callback =
+                [](void* arg) {
+                    auto* board = static_cast<PhoneAvBoard*>(arg);
+                    if (!board->IsNetworkReady()) {
+                        return;
+                    }
+                    if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
+                        Application::GetInstance().ToggleChatState();
+                    }
+                },
+            .arg = this,
+            .dispatch_method = ESP_TIMER_TASK,
+            .name = "auto_listen",
+            .skip_unhandled_events = true,
+        };
+        esp_timer_create(&auto_listen_timer_args, &auto_listen_timer_);
+        esp_timer_start_periodic(auto_listen_timer_, kAutoListenIntervalUs);
+    }
+
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) override {
         user_network_event_callback_ = std::move(callback);
         WifiBoard::SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
@@ -557,6 +589,7 @@ public:
 private:
     std::atomic<bool> network_ready_{false};
     NetworkEventCallback user_network_event_callback_;
+    esp_timer_handle_t auto_listen_timer_{nullptr};
 };
 
 bool PhoneAvNetworkReady() {
