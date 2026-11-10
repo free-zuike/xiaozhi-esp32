@@ -6,13 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       board:
-        description: 'Board directory under main/boards (change to phone-av once that board exists)'
+        description: 'Board directory under main/boards (default: phone-av)'
         required: true
-        default: 'bread-compact-wifi'
+        default: 'phone-av'
       variant:
         description: 'Build name from that board config.json'
         required: true
-        default: 'bread-compact-wifi'
+        default: 'phone-av'
       publish_release:
         description: 'Attach firmware to a GitHub Release'
         type: boolean
@@ -25,13 +25,14 @@ on:
   push:
     branches:
       - 'ci/phone-av'
+      - 'feature/phone-av-codec'
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build ${{ inputs.board || 'bread-compact-wifi' }}
+    name: Build ${{ inputs.board || 'phone-av' }}
     runs-on: ubuntu-latest
     container:
       image: espressif/idf:v6.1
@@ -41,8 +42,8 @@ jobs:
       - name: Build firmware
         shell: bash
         env:
-          BOARD: ${{ inputs.board || 'bread-compact-wifi' }}
-          VARIANT: ${{ inputs.variant || 'bread-compact-wifi' }}
+          BOARD: ${{ inputs.board || 'phone-av' }}
+          VARIANT: ${{ inputs.variant || 'phone-av' }}
         run: |
           source "$IDF_PATH/export.sh"
           idf.py --version
@@ -52,7 +53,7 @@ jobs:
       - name: Package merged binary
         shell: bash
         env:
-          BOARD: ${{ inputs.board || 'bread-compact-wifi' }}
+          BOARD: ${{ inputs.board || 'phone-av' }}
           SHA: ${{ github.sha }}
         run: |
           mkdir -p dist
@@ -61,7 +62,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: firmware-${{ inputs.board || 'bread-compact-wifi' }}
+          name: firmware-${{ inputs.board || 'phone-av' }}
           path: dist/*
           if-no-files-found: error
 
@@ -73,7 +74,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: firmware-${{ inputs.board || 'bread-compact-wifi' }}
+          name: firmware-${{ inputs.board || 'phone-av' }}
           path: dist
 
       - name: Create or update release
