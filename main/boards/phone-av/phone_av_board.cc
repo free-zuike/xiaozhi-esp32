@@ -630,6 +630,13 @@ public:
 class PhoneAvBoard : public WifiBoard {
 public:
     PhoneAvBoard() {
+        // This dev board has a green "TX" activity LED wired to the USB-serial
+        // bridge on ESP32 UART0. It blinks with every log line we print, which
+        // looks like a distracting green blink. Silence the console so the light
+        // stays off. To debug, change the level below (e.g. ESP_LOG_INFO) or
+        // remove this line and rebuild.
+        esp_log_level_set("*", ESP_LOG_NONE);
+
         // This board ships without a wake-word model (the assets partition is
         // disabled), so the default wake-word activation can never fire and the
         // device would sit idle forever. Instead, once the device is online and
@@ -645,17 +652,6 @@ public:
                     auto* board = static_cast<PhoneAvBoard*>(arg);
                     if (!board->IsNetworkReady()) {
                         return;
-                    }
-                    // Surface the STA IP periodically so the phone-av config page
-                    // (http://<ip>:8080) can actually be reached to set Phone AV Host.
-                    static int tick = 0;
-                    if (++tick % 15 == 0) {
-                        esp_netif_t* netif = esp_netif_get_default_netif();
-                        esp_netif_ip_info_t info{};
-                        if (netif != nullptr && esp_netif_get_ip_info(netif, &info) == ESP_OK) {
-                            ESP_LOGI(TAG, "STA IP: " IPSTR " (config page: http://" IPSTR ":8080/)",
-                                     IP2STR(&info.ip), IP2STR(&info.ip));
-                        }
                     }
                     // Only start a conversation when the phone's microphone stream is
                     // actually open. If the phone app is closed (or the host is wrong)
