@@ -290,6 +290,9 @@ void StartPhoneAvConfigServer() {
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start phone-av config server");
+        // The TCP/IP stack may not be ready yet when the board is constructed.
+        // Do not latch "started": a later network event must be able to retry.
+        started.store(false);
         return;
     }
     httpd_uri_t root_uri = {
@@ -834,12 +837,18 @@ public:
     }
 
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) override {
+        // This page is the board's only "screen": activation code, chat
+        // subtitles and the Phone AV host setting all live here. It must NOT
+        // depend on WiFi being connected, otherwise it disappears exactly when
+        // WiFi is broken or the board is in config AP mode (192.168.4.1) -- which
+        // is when the user needs it most. httpd binds 0.0.0.0:8080, so the very
+        // same server answers on both the STA address and the config AP address.
+        StartPhoneAvConfigServer();
         user_network_event_callback_ = std::move(callback);
         WifiBoard::SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
             network_ready_ = (event == NetworkEvent::Connected);
-            if (event == NetworkEvent::Connected) {
-                StartPhoneAvConfigServer();
-            }
+            // Idempotent; only re-attempts if an earlier httpd_start failed.
+            StartPhoneAvConfigServer();
             if (user_network_event_callback_) {
                 user_network_event_callback_(event, data);
             }
@@ -936,6 +945,19 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         default:                rr = "unknown"; break;
     }
 
+    // Report the address the page is actually reachable on (STA IP, or
+    // 192.168.4.1 while in config AP mode) and the phone host we are trying
+    // to reach. This makes "the IP did not change but the page is gone"
+    // diagnosable without a serial cable.
+    std::string local_ip = "0.0.0.0";
+    esp_netif_t* netif = esp_netif_get_default_netif();
+    esp_netif_ip_info_t info{};
+    if (netif != nullptr && esp_netif_get_ip_info(netif, &info) == ESP_OK) {
+        char ip_buf[16];
+        snprintf(ip_buf, sizeof(ip_buf), IPSTR, IP2STR(&info.ip));
+        local_ip = ip_buf;
+    }
+
     auto& screen = PhoneAvScreen();
     std::string screen_status, screen_emotion, screen_chat, screen_notice, screen_history;
     {
@@ -956,6 +978,8 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
 
     std::string body = std::string("{\n") +
         "  \"state\": \"" + state_str + "\",\n" +
+        "  \"ip\": \"" + local_ip + "\",\n" +
+        "  \"phone_av_host\": \"" + PhoneAvJsonEscape(std::string(PhoneAvHost())) + "\",\n" +
         "  \"voice_detected\": " + (voice ? "true" : "false") + ",\n" +
         "  \"phone_mic_connected\": " + (mic ? "true" : "false") + ",\n" +
         "  \"network_ready\": " + (net ? "true" : "false") + ",\n" +
