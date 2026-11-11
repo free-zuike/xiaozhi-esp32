@@ -649,11 +649,7 @@ public:
         // looks like a distracting green blink. Silence the console so the light
         // stays off. To debug, change the level below (e.g. ESP_LOG_INFO) or
         // remove this line and rebuild.
-        // Temporarily re-enable logs to diagnose why the chat audio channel is
-        // being closed right after it opens (idle<->listening blink). The green TX
-        // activity LED will blink again while logs are on; this is temporary and
-        // will be turned back off once the cause is found.
-        esp_log_level_set("*", ESP_LOG_INFO);
+        esp_log_level_set("*", ESP_LOG_NONE);
 
         // This board ships without a wake-word model (the assets partition is
         // disabled), so the default wake-word activation can never fire and the
