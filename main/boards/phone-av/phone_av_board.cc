@@ -48,13 +48,21 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req);
  * activation.message) is mirrored here and served to the phone over the LAN
  * config page. Display callbacks run from the application task while the HTTP
  * handler runs from the httpd task, so all state is mutex protected. */
+constexpr std::size_t kPhoneAvMaxLogLines = 64;
+constexpr std::size_t kPhoneAvMaxChatLines = 60;
+
 struct PhoneAvScreenState {
     std::mutex mutex;
     std::string status;
     std::string emotion;
     std::string chat_message;
     std::string notification;
-    std::vector<std::string> history;
+    // Role of the last subtitle fragment; empty once a turn has ended. Upstream
+    // pushes TTS/STT subtitles as consecutive fragments of one sentence, so
+    // they must be joined instead of each becoming its own history line.
+    std::string last_chat_role;
+    std::vector<std::string> messages;  // complete [user]/[assistant] lines
+    std::vector<std::string> history;   // device status / notification log
 };
 
 PhoneAvScreenState& PhoneAvScreen() {
@@ -86,12 +94,17 @@ std::string PhoneAvJsonEscape(const std::string& in) {
 }
 
 void PhoneAvScreenAppendLocked(PhoneAvScreenState& state, const char* kind, const char* text) {
+    if (text == nullptr || *text == '\0') {
+        // Upstream clears bubbles with empty messages. Those blank lines used
+        // to consume the history budget and push real subtitles out of view.
+        return;
+    }
     std::string line = "[";
     line += kind;
     line += "] ";
-    line += text != nullptr ? text : "";
+    line += text;
     state.history.push_back(line);
-    if (state.history.size() > 24) {
+    if (state.history.size() > kPhoneAvMaxLogLines) {
         state.history.erase(state.history.begin());
     }
 }
@@ -105,6 +118,9 @@ public:
         auto& state = PhoneAvScreen();
         std::lock_guard<std::mutex> lock(state.mutex);
         state.status = status != nullptr ? status : "";
+        // A state change (idle / listening / speaking ...) marks a new turn, so
+        // later fragments are not merged into the previous line.
+        state.last_chat_role.clear();
         PhoneAvScreenAppendLocked(state, "status", status);
     }
 
@@ -119,8 +135,30 @@ public:
         Display::SetChatMessage(role, content);
         auto& state = PhoneAvScreen();
         std::lock_guard<std::mutex> lock(state.mutex);
-        state.chat_message = content != nullptr ? content : "";
-        PhoneAvScreenAppendLocked(state, role != nullptr ? role : "chat", content);
+        const std::string text = content != nullptr ? content : "";
+        const std::string r = role != nullptr ? role : "chat";
+        state.chat_message = text;
+        if (text.empty()) {
+            // Upstream clears the bubble with an empty message at the end of a
+            // turn. Keep the recorded conversation intact but end the merge.
+            state.last_chat_role.clear();
+            return;
+        }
+        if (r == "user" || r == "assistant") {
+            if (state.last_chat_role == r && !state.messages.empty()) {
+                // TTS/STT subtitles arrive as consecutive fragments of one
+                // sentence; append instead of creating another line.
+                state.messages.back() += text;
+            } else {
+                state.messages.push_back("[" + r + "] " + text);
+                if (state.messages.size() > kPhoneAvMaxChatLines) {
+                    state.messages.erase(state.messages.begin());
+                }
+            }
+            state.last_chat_role = r;
+        } else {
+            PhoneAvScreenAppendLocked(state, r.c_str(), text.c_str());
+        }
     }
 
     void ShowNotification(const char* notification, int duration_ms) override {
@@ -136,8 +174,9 @@ public:
         auto& state = PhoneAvScreen();
         std::lock_guard<std::mutex> lock(state.mutex);
         state.chat_message.clear();
-        // Keep the history so an activation code shown earlier remains readable
-        // on the phone page after the device goes back to idle.
+        state.last_chat_role.clear();
+        // Keep the recorded conversation and history so the activation code
+        // and subtitles remain readable when the device goes back to idle.
     }
 
 private:
@@ -209,9 +248,10 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "    const r=await fetch('/status',{cache:'no-store'});"
         "    const j=await r.json();"
         "    let t='状态: '+(j.screen_status||'')+'\\n';"
-        "    if(j.screen_chat_message)t+='消息: '+j.screen_chat_message+'\\n';"
         "    if(j.screen_notification)t+='通知: '+j.screen_notification+'\\n';"
-        "    t+='\\n--- 最近屏幕记录 ---\\n';"
+        "    t+='\\n--- 对话 ---\\n';"
+        "    t+=(j.screen_messages||[]).join('\\n')||'（暂无）';"
+        "    t+='\\n\\n--- 设备日志 ---\\n';"
         "    t+=(j.screen_history||[]).join('\\n');"
         "    document.getElementById('screen').textContent=t;"
         "  }catch(e){document.getElementById('screen').textContent='读取失败: '+e;}"
@@ -963,7 +1003,7 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
     }
 
     auto& screen = PhoneAvScreen();
-    std::string screen_status, screen_emotion, screen_chat, screen_notice, screen_history;
+    std::string screen_status, screen_emotion, screen_chat, screen_notice, screen_history, screen_messages;
     {
         std::lock_guard<std::mutex> lock(screen.mutex);
         screen_status = PhoneAvJsonEscape(screen.status);
@@ -978,6 +1018,14 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
             screen_history += "\"" + PhoneAvJsonEscape(screen.history[i]) + "\"";
         }
         screen_history += "]";
+        screen_messages = "[";
+        for (size_t i = 0; i < screen.messages.size(); ++i) {
+            if (i != 0) {
+                screen_messages += ",";
+            }
+            screen_messages += "\"" + PhoneAvJsonEscape(screen.messages[i]) + "\"";
+        }
+        screen_messages += "]";
     }
 
     std::string body = std::string("{\n") +
@@ -995,6 +1043,7 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         "  \"screen_emotion\": \"" + screen_emotion + "\",\n" +
         "  \"screen_chat_message\": \"" + screen_chat + "\",\n" +
         "  \"screen_notification\": \"" + screen_notice + "\",\n" +
+        "  \"screen_messages\": " + screen_messages + ",\n" +
         "  \"screen_history\": " + screen_history + "\n" +
         "}";
     httpd_resp_set_type(req, "application/json; charset=utf-8");
