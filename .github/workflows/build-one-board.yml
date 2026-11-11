@@ -22,10 +22,6 @@ on:
         description: 'Release tag (used when publish_release is true)'
         required: false
         default: 'ci-firmware'
-  push:
-    branches:
-      - 'ci/phone-av'
-      - 'feature/phone-av-codec'
 
 permissions:
   contents: write

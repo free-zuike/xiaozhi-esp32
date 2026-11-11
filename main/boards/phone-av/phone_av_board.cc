@@ -401,7 +401,8 @@ esp_err_t PhoneAvAssetsHandler(httpd_req_t* req) {
     constexpr const char* kPrefix = "/assets/";
     constexpr std::size_t kPrefixLen = sizeof("/assets/") - 1;
     std::string name;
-    if (req->uri != nullptr && std::strncmp(req->uri, kPrefix, kPrefixLen) == 0) {
+    // req->uri is a fixed-size member array, never NULL; just match the prefix.
+    if (std::strncmp(req->uri, kPrefix, kPrefixLen) == 0) {
         name = req->uri + kPrefixLen;
     }
     auto query = name.find('?');
