@@ -858,11 +858,13 @@ public:
         boot_button_.OnLongPress(
             [this]() { Application::GetInstance().Schedule([this]() { EnterWifiConfigMode(); }); });
 
-        // Keep the console at the stock log level. This board has no physical
-        // display (Board::GetDisplay() returns NoDisplay), so xiaozhi prints the
-        // activation screen -- including the 6-digit binding code -- to the UART
-        // via Display::SetChatMessage()/Application::Alert(). Silencing the logs
-        // would make the binding code impossible to read.
+        // The green LED here is the USB-UART TX activity light: EVERY line
+        // printed on UART0 lights it up, and stock xiaozhi + the WiFi driver
+        // are chatty enough to keep it almost constantly on. The activation
+        // code and chat subtitles are now mirrored to the virtual screen at
+        // http://<board-ip>:8080/, so the console is no longer needed.
+        // To debug over serial, change this back to ESP_LOG_INFO and rebuild.
+        esp_log_level_set("*", ESP_LOG_NONE);
 
         // This board ships without a wake-word model (the assets partition is
         // disabled), so the default wake-word activation can never fire and the
