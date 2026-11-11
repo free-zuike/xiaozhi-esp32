@@ -658,13 +658,14 @@ public:
             }
             app.ToggleChatState();
         });
+        boot_button_.OnLongPress(
+            [this]() { Application::GetInstance().Schedule([this]() { EnterWifiConfigMode(); }); });
 
-        // This dev board has a green "TX" activity LED wired to the USB-serial
-        // bridge on ESP32 UART0. It blinks with every log line we print, which
-        // looks like a distracting green blink. Silence the console so the light
-        // stays off. To debug, change the level below (e.g. ESP_LOG_INFO) or
-        // remove this line and rebuild.
-        esp_log_level_set("*", ESP_LOG_NONE);
+        // Keep the console at the stock log level. This board has no physical
+        // display (Board::GetDisplay() returns NoDisplay), so xiaozhi prints the
+        // activation screen -- including the 6-digit binding code -- to the UART
+        // via Display::SetChatMessage()/Application::Alert(). Silencing the logs
+        // would make the binding code impossible to read.
 
         // This board ships without a wake-word model (the assets partition is
         // disabled), so the default wake-word activation can never fire and the
