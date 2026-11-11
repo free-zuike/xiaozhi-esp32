@@ -710,15 +710,15 @@ public:
         return network_ready_.load();
     }
 
-    bool IsPhoneMicConnected() const {
+    bool IsPhoneMicConnected() {
         auto* codec = static_cast<NetworkAudioCodec*>(GetAudioCodec());
         return codec != nullptr && codec->IsPhoneMicConnected();
     }
-    uint32_t MicConnectCount() const {
+    uint32_t MicConnectCount() {
         auto* codec = static_cast<NetworkAudioCodec*>(GetAudioCodec());
         return codec != nullptr ? codec->MicConnectCount() : 0;
     }
-    uint32_t MicDisconnectCount() const {
+    uint32_t MicDisconnectCount() {
         auto* codec = static_cast<NetworkAudioCodec*>(GetAudioCodec());
         return codec != nullptr ? codec->MicDisconnectCount() : 0;
     }
