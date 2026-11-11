@@ -2,6 +2,7 @@
 #include "button.h"
 #include "audio_codec.h"
 #include "camera.h"
+#include "display.h"
 #include "config.h"
 #include "settings.h"
 #include "system_info.h"
@@ -41,6 +42,108 @@ bool PhoneAvNetworkReady();
 
 // Diagnostics endpoint handler; defined below (after PhoneAvBoard is complete).
 esp_err_t PhoneAvStatusHandler(httpd_req_t* req);
+
+/* This board has no physical display, so xiaozhi's "screen" content (status,
+ * notifications and chat messages -- including the 6-digit activation code in
+ * activation.message) is mirrored here and served to the phone over the LAN
+ * config page. Display callbacks run from the application task while the HTTP
+ * handler runs from the httpd task, so all state is mutex protected. */
+struct PhoneAvScreenState {
+    std::mutex mutex;
+    std::string status;
+    std::string emotion;
+    std::string chat_message;
+    std::string notification;
+    std::vector<std::string> history;
+};
+
+PhoneAvScreenState& PhoneAvScreen() {
+    static PhoneAvScreenState state;
+    return state;
+}
+
+std::string PhoneAvJsonEscape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size() + 8);
+    for (unsigned char c : in) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    out += buf;
+                } else {
+                    out += static_cast<char>(c);
+                }
+        }
+    }
+    return out;
+}
+
+void PhoneAvScreenAppendLocked(PhoneAvScreenState& state, const char* kind, const char* text) {
+    std::string line = "[";
+    line += kind;
+    line += "] ";
+    line += text != nullptr ? text : "";
+    state.history.push_back(line);
+    if (state.history.size() > 24) {
+        state.history.erase(state.history.begin());
+    }
+}
+
+class PhoneAvDisplay : public Display {
+public:
+    using Display::ShowNotification;
+
+    void SetStatus(const char* status) override {
+        Display::SetStatus(status);
+        auto& state = PhoneAvScreen();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.status = status != nullptr ? status : "";
+        PhoneAvScreenAppendLocked(state, "status", status);
+    }
+
+    void SetEmotion(const char* emotion) override {
+        Display::SetEmotion(emotion);
+        auto& state = PhoneAvScreen();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.emotion = emotion != nullptr ? emotion : "";
+    }
+
+    void SetChatMessage(const char* role, const char* content) override {
+        Display::SetChatMessage(role, content);
+        auto& state = PhoneAvScreen();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.chat_message = content != nullptr ? content : "";
+        PhoneAvScreenAppendLocked(state, role != nullptr ? role : "chat", content);
+    }
+
+    void ShowNotification(const char* notification, int duration_ms) override {
+        Display::ShowNotification(notification, duration_ms);
+        auto& state = PhoneAvScreen();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.notification = notification != nullptr ? notification : "";
+        PhoneAvScreenAppendLocked(state, "notice", notification);
+    }
+
+    void ClearChatMessages() override {
+        Display::ClearChatMessages();
+        auto& state = PhoneAvScreen();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.chat_message.clear();
+        // Keep the history so an activation code shown earlier remains readable
+        // on the phone page after the device goes back to idle.
+    }
+
+private:
+    bool Lock(int timeout_ms = 0) override { return true; }
+    void Unlock() override {}
+};
 
 constexpr uint16_t kPhoneAvConfigPort = 8080;
 constexpr const char* kPhoneAvConfigNs = "phone_av";
@@ -95,6 +198,26 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "<p>保存后板子会自动重启一次让新地址生效；WiFi 配置不会丢失。"
         "以后手机 IP 变了只需再来这里改，不用重刷固件。</p>"
         "<p><a href=\"/api/host\">查看当前地址（纯文本）</a></p>"
+        "<h2>设备屏幕（虚拟）</h2>"
+        "<p>本板无物理屏幕，xiaozhi 的屏幕内容（含 6 位设备验证码）显示在这里，每秒刷新。</p>"
+        "<div id=\"screen\" style=\"white-space:pre-wrap;word-break:break-all;"
+        "background:#111;color:#eee;padding:12px;border-radius:6px;font-family:monospace\">"
+        "读取中...</div>"
+        "<script>"
+        "async function refreshScreen(){"
+        "  try{"
+        "    const r=await fetch('/status',{cache:'no-store'});"
+        "    const j=await r.json();"
+        "    let t='状态: '+(j.screen_status||'')+'\\n';"
+        "    if(j.screen_chat_message)t+='消息: '+j.screen_chat_message+'\\n';"
+        "    if(j.screen_notification)t+='通知: '+j.screen_notification+'\\n';"
+        "    t+='\\n--- 最近屏幕记录 ---\\n';"
+        "    t+=(j.screen_history||[]).join('\\n');"
+        "    document.getElementById('screen').textContent=t;"
+        "  }catch(e){document.getElementById('screen').textContent='读取失败: '+e;}"
+        "}"
+        "setInterval(refreshScreen,1000);refreshScreen();"
+        "</script>"
         "</body></html>";
     return html;
 }
@@ -752,6 +875,11 @@ public:
         return &camera;
     }
 
+    virtual Display* GetDisplay() override {
+        static PhoneAvDisplay display;
+        return &display;
+    }
+
     virtual Led* GetLed() override {
         static PhoneAvLed led(BUILTIN_LED_GPIO);
         return &led;
@@ -807,6 +935,24 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         default:                rr = "unknown"; break;
     }
 
+    auto& screen = PhoneAvScreen();
+    std::string screen_status, screen_emotion, screen_chat, screen_notice, screen_history;
+    {
+        std::lock_guard<std::mutex> lock(screen.mutex);
+        screen_status = PhoneAvJsonEscape(screen.status);
+        screen_emotion = PhoneAvJsonEscape(screen.emotion);
+        screen_chat = PhoneAvJsonEscape(screen.chat_message);
+        screen_notice = PhoneAvJsonEscape(screen.notification);
+        screen_history = "[";
+        for (size_t i = 0; i < screen.history.size(); ++i) {
+            if (i != 0) {
+                screen_history += ",";
+            }
+            screen_history += "\"" + PhoneAvJsonEscape(screen.history[i]) + "\"";
+        }
+        screen_history += "]";
+    }
+
     std::string body = std::string("{\n") +
         "  \"state\": \"" + state_str + "\",\n" +
         "  \"voice_detected\": " + (voice ? "true" : "false") + ",\n" +
@@ -815,7 +961,12 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         "  \"mic_connect_count\": " + std::to_string(mc) + ",\n" +
         "  \"mic_disconnect_count\": " + std::to_string(md) + ",\n" +
         "  \"uptime_ms\": " + std::to_string(up) + ",\n" +
-        "  \"reset_reason\": \"" + rr + "\"\n" +
+        "  \"reset_reason\": \"" + rr + "\",\n" +
+        "  \"screen_status\": \"" + screen_status + "\",\n" +
+        "  \"screen_emotion\": \"" + screen_emotion + "\",\n" +
+        "  \"screen_chat_message\": \"" + screen_chat + "\",\n" +
+        "  \"screen_notification\": \"" + screen_notice + "\",\n" +
+        "  \"screen_history\": " + screen_history + "\n" +
         "}";
     httpd_resp_set_type(req, "application/json; charset=utf-8");
     return httpd_resp_send(req, body.c_str(), HTTPD_RESP_USE_STRLEN);
