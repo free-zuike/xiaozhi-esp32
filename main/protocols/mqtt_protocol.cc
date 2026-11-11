@@ -511,25 +511,36 @@ bool MqttProtocol::CryptAesCtr(const uint8_t* input, size_t input_size, const ui
     }
 
     psa_cipher_operation_t operation = PSA_CIPHER_OPERATION_INIT;
-    psa_status_t status = psa_cipher_encrypt_setup(&operation, aes_key_id_, PSA_ALG_CTR);
-    if (status == PSA_SUCCESS) {
-        status = psa_cipher_set_iv(&operation, nonce, 16);
+    psa_status_t s_setup = psa_cipher_encrypt_setup(&operation, aes_key_id_, PSA_ALG_CTR);
+    psa_status_t s_iv = PSA_SUCCESS;
+    if (s_setup == PSA_SUCCESS) {
+        s_iv = psa_cipher_set_iv(&operation, nonce, 16);
     }
 
     size_t output_len = 0;
-    if (status == PSA_SUCCESS) {
-        status = psa_cipher_update(&operation, input, input_size, output, input_size, &output_len);
+    psa_status_t s_update = PSA_SUCCESS;
+    if (s_setup == PSA_SUCCESS && s_iv == PSA_SUCCESS) {
+        s_update = psa_cipher_update(&operation, input, input_size, output, input_size, &output_len);
     }
 
     uint8_t finish_output[16];
     size_t finish_len = 0;
-    if (status == PSA_SUCCESS) {
-        status = psa_cipher_finish(&operation, finish_output, sizeof(finish_output), &finish_len);
+    psa_status_t s_finish = PSA_SUCCESS;
+    if (s_setup == PSA_SUCCESS && s_iv == PSA_SUCCESS && s_update == PSA_SUCCESS) {
+        s_finish = psa_cipher_finish(&operation, finish_output, sizeof(finish_output), &finish_len);
     }
     psa_cipher_abort(&operation);
 
+    psa_status_t status = s_setup != PSA_SUCCESS ? s_setup
+                          : s_iv != PSA_SUCCESS ? s_iv
+                          : s_update != PSA_SUCCESS ? s_update
+                                                   : s_finish;
     if (status != PSA_SUCCESS || output_len != input_size || finish_len != 0) {
-        ESP_LOGE(TAG, "AES-CTR operation failed, status: %ld", static_cast<long>(status));
+        ESP_LOGE(TAG,
+                 "AES-CTR failed: setup=%ld iv=%ld update=%ld finish=%ld in=%u out=%u fin=%u",
+                 static_cast<long>(s_setup), static_cast<long>(s_iv), static_cast<long>(s_update),
+                 static_cast<long>(s_finish), static_cast<unsigned>(input_size),
+                 static_cast<unsigned>(output_len), static_cast<unsigned>(finish_len));
         return false;
     }
     return true;
