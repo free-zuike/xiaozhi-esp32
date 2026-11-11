@@ -837,18 +837,22 @@ public:
     }
 
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) override {
-        // This page is the board's only "screen": activation code, chat
-        // subtitles and the Phone AV host setting all live here. It must NOT
-        // depend on WiFi being connected, otherwise it disappears exactly when
-        // WiFi is broken or the board is in config AP mode (192.168.4.1) -- which
-        // is when the user needs it most. httpd binds 0.0.0.0:8080, so the very
-        // same server answers on both the STA address and the config AP address.
-        StartPhoneAvConfigServer();
         user_network_event_callback_ = std::move(callback);
         WifiBoard::SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
             network_ready_ = (event == NetworkEvent::Connected);
-            // Idempotent; only re-attempts if an earlier httpd_start failed.
-            StartPhoneAvConfigServer();
+            // This page is the board's only "screen" (activation code, chat
+            // subtitles, Phone AV host), so keep it reachable both on a good
+            // STA link and in config AP mode (192.168.4.1), when WiFi is broken
+            // and the page is needed most.
+            // httpd_start must NOT run any earlier than a network event:
+            // Application calls SetNetworkEventCallback before StartNetwork(),
+            // while lwIP is not initialised yet, and httpd_start there asserts
+            // "tcpip_send_msg_wait_sem ... (Invalid mbox)" and reboot-loops.
+            // Idempotent; re-attempts only if an earlier httpd_start failed.
+            if (event == NetworkEvent::Connected ||
+                event == NetworkEvent::WifiConfigModeEnter) {
+                StartPhoneAvConfigServer();
+            }
             if (user_network_event_callback_) {
                 user_network_event_callback_(event, data);
             }
