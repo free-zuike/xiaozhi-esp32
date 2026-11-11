@@ -34,12 +34,12 @@
 
 #define TAG "PhoneAvBoard"
 
-// Diagnostics endpoint handler; defined below (after PhoneAvBoard is complete).
-esp_err_t PhoneAvStatusHandler(httpd_req_t* req);
-
 namespace {
 
 bool PhoneAvNetworkReady();
+
+// Diagnostics endpoint handler; defined below (after PhoneAvBoard is complete).
+esp_err_t PhoneAvStatusHandler(httpd_req_t* req);
 
 constexpr uint16_t kPhoneAvConfigPort = 8080;
 constexpr const char* kPhoneAvConfigNs = "phone_av";
