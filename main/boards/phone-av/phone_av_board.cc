@@ -7,6 +7,7 @@
 #include "settings.h"
 #include "system_info.h"
 #include "application.h"
+#include "assets.h"
 #include <esp_timer.h>
 
 #include "led/led.h"
@@ -21,6 +22,7 @@
 #include <cstring>
 #include <expected>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -42,6 +44,9 @@ bool PhoneAvNetworkReady();
 
 // Diagnostics endpoint handler; defined below (after PhoneAvBoard is complete).
 esp_err_t PhoneAvStatusHandler(httpd_req_t* req);
+// Serves files straight out of the real assets partition: the same index.json
+// and emoji images that a physical LVGL display would consume.
+esp_err_t PhoneAvAssetsHandler(httpd_req_t* req);
 
 /* This board has no physical display, so xiaozhi's "screen" content (status,
  * notifications and chat messages -- including the 6-digit activation code in
@@ -57,6 +62,11 @@ struct PhoneAvScreenState {
     std::string emotion;
     std::string chat_message;
     std::string notification;
+    // Mirrored from the standard Display interface so the virtual screen can
+    // prove that Assets::Apply() really ran. A real LCD would render these;
+    // here they are only reported over HTTP.
+    std::string theme;
+    bool custom_emoji_collection = false;
     // Role of the last subtitle fragment; empty once a turn has ended. Upstream
     // pushes TTS/STT subtitles as consecutive fragments of one sentence, so
     // they must be joined instead of each becoming its own history line.
@@ -179,6 +189,27 @@ public:
         // and subtitles remain readable when the device goes back to idle.
     }
 
+    // Assets::Apply() pushes the parsed theme and custom emoji collection
+    // through these standard Display hooks. A physical LVGL screen would draw
+    // them; the virtual screen only records that they arrived, and the web page
+    // renders the very same image files straight from the assets partition.
+    // Keeping these hooks means swapping in a real LCD later needs no changes
+    // in application.cc / assets.cc / the MCP tools.
+    void SetTheme(Theme* theme) override {
+        Display::SetTheme(theme);
+        auto& state = PhoneAvScreen();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.theme = theme != nullptr ? theme->name() : "";
+    }
+
+    void SetEmojiCollection(std::shared_ptr<EmojiCollection> collection) override {
+        const bool present = collection != nullptr;
+        Display::SetEmojiCollection(std::move(collection));
+        auto& state = PhoneAvScreen();
+        std::lock_guard<std::mutex> lock(state.mutex);
+        state.custom_emoji_collection = present;
+    }
+
 private:
     bool Lock(int timeout_ms = 0) override { return true; }
     void Unlock() override {}
@@ -239,21 +270,63 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "<p><a href=\"/api/host\">查看当前地址（纯文本）</a></p>"
         "<h2>设备屏幕（虚拟）</h2>"
         "<p>本板无物理屏幕，xiaozhi 的屏幕内容（含 6 位设备验证码）显示在这里，每秒刷新。</p>"
+        "<p>主题色、表情图片与背景资源都取自真实的 assets 分区（与实体 LCD 同一份 index.json）。</p>"
+        "<div id=\"face\" style=\"text-align:center;min-height:72px\">"
+        "<img id=\"faceImg\" alt=\"\" style=\"display:none;max-width:128px;max-height:128px\">"
+        "</div>"
         "<div id=\"screen\" style=\"white-space:pre-wrap;word-break:break-all;"
         "background:#111;color:#eee;padding:12px;border-radius:6px;font-family:monospace\">"
         "读取中...</div>"
         "<script>"
+        "let assetIndex=null;"
+        "fetch('/assets/index.json',{cache:'no-store'})"
+        "  .then(r=>r.ok?r.json():null).then(j=>{assetIndex=j;applySkin();})"
+        "  .catch(()=>{});"
+        "function applySkin(){"
+        "  if(!assetIndex||!assetIndex.skin)return;"
+        "  const s=assetIndex.skin.light||assetIndex.skin.dark;"
+        "  if(!s)return;"
+        "  const box=document.getElementById('screen');"
+        "  if(s.background_color)box.style.background=s.background_color;"
+        "  if(s.text_color)box.style.color=s.text_color;"
+        "  if(s.background_image){"
+        "    const base=s.background_image.replace(/\\.[^.]+$/,'');"
+        "    const probe=new Image();let alt=false;"
+        "    probe.onload=function(){"
+        "      box.style.backgroundImage='url('+probe.src+')';"
+        "      box.style.backgroundSize='cover';"
+        "    };"
+        "    probe.onerror=function(){if(!alt){alt=true;probe.src='/assets/'+base+'.jpg';}};"
+        "    probe.src='/assets/'+base+'.png';"
+        "  }"
+        "}"
+        "function applyFace(emotion){"
+        "  const img=document.getElementById('faceImg');"
+        "  if(!emotion||!assetIndex||!Array.isArray(assetIndex.emoji_collection)){"
+        "    img.style.display='none';return;"
+        "  }"
+        "  const list=assetIndex.emoji_collection;"
+        "  const e=list.find(x=>x.name===emotion)||"
+        "          list.find(x=>x.name&&x.name.indexOf(emotion)===0);"
+        "  if(!e||!e.file){img.style.display='none';return;}"
+        "  img.onload=function(){img.style.display='inline';};"
+        "  img.onerror=function(){img.style.display='none';};"
+        "  img.src='/assets/'+e.file;"
+        "}"
         "async function refreshScreen(){"
         "  try{"
         "    const r=await fetch('/status',{cache:'no-store'});"
         "    const j=await r.json();"
         "    let t='状态: '+(j.screen_status||'')+'\\n';"
+        "    t+='表情: '+(j.screen_emotion||'')+'  主题: '+(j.screen_theme||'')+'\\n';"
+        "    t+='资源分区: '+(j.assets_valid?'有效':'未就绪')+'\\n';"
         "    if(j.screen_notification)t+='通知: '+j.screen_notification+'\\n';"
         "    t+='\\n--- 对话 ---\\n';"
         "    t+=(j.screen_messages||[]).join('\\n')||'（暂无）';"
         "    t+='\\n\\n--- 设备日志 ---\\n';"
         "    t+=(j.screen_history||[]).join('\\n');"
         "    document.getElementById('screen').textContent=t;"
+        "    applyFace(j.screen_emotion);"
         "  }catch(e){document.getElementById('screen').textContent='读取失败: '+e;}"
         "}"
         "setInterval(refreshScreen,1000);refreshScreen();"
@@ -319,6 +392,52 @@ esp_err_t PhoneAvConfigSetHandler(httpd_req_t* req) {
     return ESP_OK;
 }
 
+/* The virtual screen is a thin mirror of the real assets partition:
+ * index.json, emoji PNG/GIF files and backgrounds are read through
+ * Assets::GetAssetData() and sent verbatim. A physical LVGL display consumes
+ * exactly the same bytes, so none of this has to be rewritten when the LCD
+ * arrives -- only the Display implementation behind GetDisplay() changes. */
+esp_err_t PhoneAvAssetsHandler(httpd_req_t* req) {
+    constexpr const char* kPrefix = "/assets/";
+    constexpr std::size_t kPrefixLen = sizeof("/assets/") - 1;
+    std::string name;
+    if (req->uri != nullptr && std::strncmp(req->uri, kPrefix, kPrefixLen) == 0) {
+        name = req->uri + kPrefixLen;
+    }
+    auto query = name.find('?');
+    if (query != std::string::npos) {
+        name.resize(query);
+    }
+    if (name.empty() || name.find("..") != std::string::npos) {
+        httpd_resp_send_404(req);
+        return ESP_FAIL;
+    }
+
+    void* data = nullptr;
+    std::size_t size = 0;
+    if (!Assets::GetInstance().GetAssetData(name, data, size) || data == nullptr || size == 0) {
+        httpd_resp_send_404(req);
+        return ESP_FAIL;
+    }
+
+    const char* type = "application/octet-stream";
+    auto dot = name.rfind('.');
+    if (dot != std::string::npos) {
+        const std::string ext = name.substr(dot);
+        if (ext == ".png") {
+            type = "image/png";
+        } else if (ext == ".gif") {
+            type = "image/gif";
+        } else if (ext == ".jpg" || ext == ".jpeg") {
+            type = "image/jpeg";
+        } else if (ext == ".json") {
+            type = "application/json; charset=utf-8";
+        }
+    }
+    httpd_resp_set_type(req, type);
+    return httpd_resp_send(req, static_cast<const char*>(data), static_cast<ssize_t>(size));
+}
+
 void StartPhoneAvConfigServer() {
     static std::atomic<bool> started{false};
     if (started.exchange(true)) {
@@ -326,7 +445,7 @@ void StartPhoneAvConfigServer() {
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kPhoneAvConfigPort;
-    config.max_uri_handlers = 5;
+    config.max_uri_handlers = 8;
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start phone-av config server");
@@ -355,6 +474,11 @@ void StartPhoneAvConfigServer() {
         .handler = PhoneAvStatusHandler, .user_ctx = nullptr,
     };
     httpd_register_uri_handler(server, &status_uri);
+    httpd_uri_t assets_uri = {
+        .uri = "/assets/*", .method = HTTP_GET,
+        .handler = PhoneAvAssetsHandler, .user_ctx = nullptr,
+    };
+    httpd_register_uri_handler(server, &assets_uri);
 
     esp_netif_t* netif = esp_netif_get_default_netif();
     esp_netif_ip_info_t info{};
@@ -805,10 +929,15 @@ private:
 };
 
 // The dev-board RGB (GPIO 48) is a standard GRB SK6812/WS2812. SingleLed drives
-// it as GRB too, so SetColor(r,g,b) maps directly: (0,4,0) -> green, (0,0,4) ->
-// blue, (4,0,0) -> red. The stock listening state also breathes/flickers with
-// voice detection, which looks like a blinking light. Use a custom LED that stays
-// solid and is off when idle.
+// it as GRB too, so SetColor(r,g,b) maps directly: (0,g,0) -> green, (0,0,b) ->
+// blue, (r,0,0) -> red. Keep the state -> colour mapping identical to a real
+// board; only the brightness is tuned here. Auto-listen keeps the device in
+// Listening while the phone App is open, so a full green would stay on forever.
+// When the wake-word model / real accessories arrive and auto-listen is removed,
+// these two constants are the only values that need re-tuning.
+constexpr uint8_t kListeningLedLevel = 1;
+constexpr uint8_t kSpeakingLedLevel = 4;
+
 class PhoneAvLed : public SingleLed {
 public:
     explicit PhoneAvLed(gpio_num_t gpio) : SingleLed(gpio) {}
@@ -821,13 +950,12 @@ public:
                 break;
             case kDeviceStateListening:
             case kDeviceStateAudioTesting:
-                // Solid green.
-                SetColor(0, 4, 0);
+                SetColor(0, kListeningLedLevel, 0);
                 TurnOn();
                 break;
             case kDeviceStateSpeaking:
             case kDeviceStateNotifying:
-                SetColor(0, 0, 4);
+                SetColor(0, 0, kSpeakingLedLevel);
                 TurnOn();
                 break;
             default:
@@ -858,14 +986,9 @@ public:
         boot_button_.OnLongPress(
             [this]() { Application::GetInstance().Schedule([this]() { EnterWifiConfigMode(); }); });
 
-        // The green LED here is the USB-UART TX activity light: EVERY line
-        // printed on UART0 lights it up, and stock xiaozhi + the WiFi driver
-        // are chatty enough to keep it almost constantly on. The activation
-        // code and chat subtitles are now mirrored to the virtual screen at
-        // http://<board-ip>:8080/, so the console is no longer needed.
-        // To debug over serial, change this back to ESP_LOG_INFO and rebuild.
-        esp_log_level_set("*", ESP_LOG_NONE);
-
+        // Keep UART0 logging enabled. The RGB status LED is on GPIO 48 (WS2812)
+        // and is unrelated to the USB-UART TX activity LED; serial logs are the
+        // only way to debug the phone audio stream on this board.
         // This board ships without a wake-word model (the assets partition is
         // disabled), so the default wake-word activation can never fire and the
         // device would sit idle forever. Instead, once the device is online and
@@ -1011,6 +1134,7 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
     const uint32_t sp_ok = codec != nullptr ? codec->SpeakerPostOk() : 0;
     const uint32_t sp_fail = codec != nullptr ? codec->SpeakerPostFail() : 0;
     const uint32_t sp_samples = codec != nullptr ? codec->SpeakerSamples() : 0;
+    const bool assets_valid = Assets::GetInstance().partition_valid();
 
     const char* rr = "unknown";
     switch (esp_reset_reason()) {
@@ -1040,11 +1164,15 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
     }
 
     auto& screen = PhoneAvScreen();
-    std::string screen_status, screen_emotion, screen_chat, screen_notice, screen_history, screen_messages;
+    std::string screen_status, screen_emotion, screen_theme, screen_chat, screen_notice;
+    std::string screen_history, screen_messages;
+    bool custom_emoji_collection = false;
     {
         std::lock_guard<std::mutex> lock(screen.mutex);
         screen_status = PhoneAvJsonEscape(screen.status);
         screen_emotion = PhoneAvJsonEscape(screen.emotion);
+        screen_theme = PhoneAvJsonEscape(screen.theme);
+        custom_emoji_collection = screen.custom_emoji_collection;
         screen_chat = PhoneAvJsonEscape(screen.chat_message);
         screen_notice = PhoneAvJsonEscape(screen.notification);
         screen_history = "[";
@@ -1079,8 +1207,11 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         "  \"speaker_samples\": " + std::to_string(sp_samples) + ",\n" +
         "  \"uptime_ms\": " + std::to_string(up) + ",\n" +
         "  \"reset_reason\": \"" + rr + "\",\n" +
+        "  \"assets_valid\": " + (assets_valid ? "true" : "false") + ",\n" +
         "  \"screen_status\": \"" + screen_status + "\",\n" +
         "  \"screen_emotion\": \"" + screen_emotion + "\",\n" +
+        "  \"screen_theme\": \"" + screen_theme + "\",\n" +
+        "  \"screen_emoji_collection\": " + (custom_emoji_collection ? "true" : "false") + ",\n" +
         "  \"screen_chat_message\": \"" + screen_chat + "\",\n" +
         "  \"screen_notification\": \"" + screen_notice + "\",\n" +
         "  \"screen_messages\": " + screen_messages + ",\n" +
