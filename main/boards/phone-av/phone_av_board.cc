@@ -7,8 +7,8 @@
 #include "application.h"
 #include <esp_timer.h>
 
-#include "led.h"
-#include "single_led.h"
+#include "led/led.h"
+#include "led/single_led.h"
 
 #include <algorithm>
 #include <atomic>
