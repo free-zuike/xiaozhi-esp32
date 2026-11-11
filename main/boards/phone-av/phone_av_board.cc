@@ -416,7 +416,7 @@ private:
 class NetworkAudioCodec : public AudioCodec {
 public:
     NetworkAudioCodec(int input_sample_rate, int output_sample_rate)
-        : mic_buffer_(kBufferSamples), speaker_buffer_(kBufferSamples) {
+        : mic_buffer_(kMicBufferSamples), speaker_buffer_(kSpeakerBufferSamples) {
         duplex_ = true;
         input_reference_ = false;
         input_channels_ = 1;
@@ -494,11 +494,18 @@ public:
     bool IsPhoneMicConnected() const { return mic_connected_; }
     uint32_t MicConnectCount() const { return mic_connect_count_; }
     uint32_t MicDisconnectCount() const { return mic_disconnect_count_; }
+    uint32_t SpeakerPostOk() const { return speaker_post_ok_.load(); }
+    uint32_t SpeakerPostFail() const { return speaker_post_fail_.load(); }
+    uint32_t SpeakerSamples() const { return speaker_samples_.load(); }
 
     private:
-    static constexpr std::size_t kBufferSamples = 16000;
+    static constexpr std::size_t kMicBufferSamples = 16000;      // 1 s @ 16 kHz
+    static constexpr std::size_t kSpeakerBufferSamples = 32000;  // 2 s @ 16 kHz
     static constexpr std::size_t kHttpReadSize = 1024;
-    static constexpr std::size_t kPostSamples = 320;
+    // A POST every 20 ms saturated the ESP32 with TCP handshakes and starved
+    // the phone's AudioTrack. Batch 100 ms of PCM per request instead.
+    static constexpr std::size_t kPostSamples = 1600;
+    static constexpr std::size_t kPostFlushMs = 100;
 
     static void MicTaskEntry(void* arg) {
         auto* codec = static_cast<NetworkAudioCodec*>(arg);
@@ -569,14 +576,12 @@ public:
             mic_connect_count_++;
             pending_valid = false;
             zero_read_count_ = 0;
+            // Keep the WiFi modem fully awake while the phone's mic stream is
+            // active (modem sleep stalls TCP and used to cause reconnect storms).
+            // Set it ONCE per connection: calling it on every Read() churned the
+            // WiFi driver ~100x/s and disturbed speaker POSTs on the same link.
+            esp_wifi_set_ps(WIFI_PS_NONE);
             while (running_ && PhoneAvNetworkReady()) {
-                // Keep the WiFi modem fully awake while the phone's upstream mic stream is
-                // active. If the radio is allowed to enter modem sleep the TCP flow stalls,
-                // the phone's send buffer fills, its writeChunk() times out and closes the
-                // socket, which used to trigger a tight reconnect storm (and the green LED
-                // blinking). This board is a tethered streaming device, so always-on WiFi is
-                // the right trade-off.
-                esp_wifi_set_ps(WIFI_PS_NONE);
                 auto ret = http->Read(reinterpret_cast<char*>(raw), sizeof(raw));
                 if (!ret) {
                     ESP_LOGW(TAG, "Phone microphone stream read failed");
@@ -638,13 +643,36 @@ public:
                 vTaskDelay(pdMS_TO_TICKS(500));
                 continue;
             }
-            std::size_t count = speaker_buffer_.Pop(chunk, kPostSamples);
+            // Accumulate up to kPostSamples (100 ms) before one POST. The decoded
+            // TTS arrives as 20 ms frames; sending each frame separately meant
+            // ~50 TCP handshakes per second, and any slow round trip made the
+            // 1-second ring buffer overflow and silently drop audio.
+            std::size_t count = 0;
+            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(kPostFlushMs);
+            while (count < kPostSamples && running_) {
+                count += speaker_buffer_.Pop(chunk + count, kPostSamples - count);
+                if (count >= kPostSamples || xTaskGetTickCount() >= deadline) {
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(5));
+            }
             if (count == 0) {
-                vTaskDelay(pdMS_TO_TICKS(10));
                 continue;
             }
-            if (!PostPcm(url, chunk, count)) {
-                vTaskDelay(pdMS_TO_TICKS(100));
+            // A failed POST used to discard the popped samples outright. Retry
+            // once with the same buffer so a transient network hiccup does not
+            // punch a hole in the playback.
+            bool ok = PostPcm(url, chunk, count);
+            if (!ok) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+                ok = PostPcm(url, chunk, count);
+            }
+            if (ok) {
+                speaker_post_ok_.fetch_add(1);
+                speaker_samples_.fetch_add(static_cast<uint32_t>(count));
+            } else {
+                speaker_post_fail_.fetch_add(1);
+                vTaskDelay(pdMS_TO_TICKS(50));
             }
         }
     }
@@ -658,6 +686,9 @@ public:
     std::atomic<bool> mic_connected_{false};
     std::atomic<uint32_t> mic_connect_count_{0};
     std::atomic<uint32_t> mic_disconnect_count_{0};
+    std::atomic<uint32_t> speaker_post_ok_{0};
+    std::atomic<uint32_t> speaker_post_fail_{0};
+    std::atomic<uint32_t> speaker_samples_{0};
     };
 
 class NetworkCamera : public Camera {
@@ -974,6 +1005,10 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
     const uint32_t mc = board->MicConnectCount();
     const uint32_t md = board->MicDisconnectCount();
     const uint32_t up = board->UptimeMs();
+    auto* codec = static_cast<NetworkAudioCodec*>(board->GetAudioCodec());
+    const uint32_t sp_ok = codec != nullptr ? codec->SpeakerPostOk() : 0;
+    const uint32_t sp_fail = codec != nullptr ? codec->SpeakerPostFail() : 0;
+    const uint32_t sp_samples = codec != nullptr ? codec->SpeakerSamples() : 0;
 
     const char* rr = "unknown";
     switch (esp_reset_reason()) {
@@ -1037,6 +1072,9 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         "  \"network_ready\": " + (net ? "true" : "false") + ",\n" +
         "  \"mic_connect_count\": " + std::to_string(mc) + ",\n" +
         "  \"mic_disconnect_count\": " + std::to_string(md) + ",\n" +
+        "  \"speaker_post_ok\": " + std::to_string(sp_ok) + ",\n" +
+        "  \"speaker_post_fail\": " + std::to_string(sp_fail) + ",\n" +
+        "  \"speaker_samples\": " + std::to_string(sp_samples) + ",\n" +
         "  \"uptime_ms\": " + std::to_string(up) + ",\n" +
         "  \"reset_reason\": \"" + rr + "\",\n" +
         "  \"screen_status\": \"" + screen_status + "\",\n" +
