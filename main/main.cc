@@ -13,6 +13,8 @@
 
 extern "C" void app_main(void)
 {
+    // DEBUG: force all logs on so serial captures crashes (phone-av bring-up)
+    esp_log_level_set("*", ESP_LOG_INFO);
     // Initialize NVS flash for WiFi configuration
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
