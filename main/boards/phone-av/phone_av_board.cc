@@ -7,6 +7,9 @@
 #include "application.h"
 #include <esp_timer.h>
 
+#include "led.h"
+#include "single_led.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -419,6 +422,12 @@ public:
             }
             http->Close();
             mic_connected_ = false;
+            // The phone mic just dropped. If we were actively listening on it,
+            // leave the chat session so the device returns to idle (LED off)
+            // instead of sitting in a dead "listening" state with no audio.
+            if (Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
+                Application::GetInstance().StopListening();
+            }
             vTaskDelay(pdMS_TO_TICKS(200));
         }
     }
@@ -583,6 +592,41 @@ private:
     std::string explain_token_;
 };
 
+// The dev-board RGB (GPIO 48) is wired in RGB order while SingleLed drives it as
+// GRB, so the framework's "red" channel reads as green on this board. The stock
+// listening state also breathes/flickers with voice detection, which looks like a
+// blinking green light. Use a custom LED that stays solid and is off when idle.
+class PhoneAvLed : public SingleLed {
+public:
+    explicit PhoneAvLed(gpio_num_t gpio) : SingleLed(gpio) {}
+
+    void OnStateChanged() override {
+        auto& app = Application::GetInstance();
+        switch (app.GetDeviceState()) {
+            case kDeviceStateIdle:
+                TurnOff();
+                break;
+            case kDeviceStateListening:
+            case kDeviceStateAudioTesting:
+                // Solid green (the red channel reads green here); no voice-detection
+                // brightness flicker.
+                SetColor(4, 0, 0);
+                TurnOn();
+                break;
+            case kDeviceStateSpeaking:
+            case kDeviceStateNotifying:
+                SetColor(0, 0, 4);
+                TurnOn();
+                break;
+            default:
+                // starting / configuring / activating / upgrading / connecting:
+                // keep the light off to avoid a distracting blink.
+                TurnOff();
+                break;
+        }
+    }
+};
+
 class PhoneAvBoard : public WifiBoard {
 public:
     PhoneAvBoard() {
@@ -664,6 +708,11 @@ public:
     virtual Camera* GetCamera() override {
         static NetworkCamera camera;
         return &camera;
+    }
+
+    virtual Led* GetLed() override {
+        static PhoneAvLed led(BUILTIN_LED_GPIO);
+        return &led;
     }
 
 private:
