@@ -793,11 +793,13 @@ public:
         // This board ships without a wake-word model (the assets partition is
         // disabled), so the default wake-word activation can never fire and the
         // device would sit idle forever. Instead, once the device is online and
-        // activated, automatically start a hands-free conversation — no button
-        // needed. ToggleChatState() uses the default AutoStop mode, so after each
-        // reply the device returns to Listening and the chat stays alive. A slow
-        // periodic timer re-arms listening whenever the device is back to Idle
-        // (e.g. after a dropped connection), keeping the conversation going.
+        // activated, automatically start a conversation — no button needed.
+        // A slow periodic timer re-arms it whenever the device is back to Idle
+        // (e.g. after a reply or a dropped connection), keeping the chat going.
+        // It must only call ToggleChatState(): the stock state machine then runs
+        // Idle -> Connecting -> OpenAudioChannel() (hello / session_id / UDP) ->
+        // Listening. Setting the state to Listening directly here would skip that
+        // handshake and the next toggle would immediately close the channel.
         constexpr uint64_t kAutoListenIntervalUs = 1000000;  // 1 s
         esp_timer_create_args_t auto_listen_timer_args = {
             .callback =
@@ -813,12 +815,11 @@ public:
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
                         auto* codec = static_cast<NetworkAudioCodec*>(board->GetAudioCodec());
                         if (codec != nullptr && codec->IsPhoneMicConnected()) {
-                            // ManualStop keeps the conversation open across turns: the device
-                            // does not auto-stop after a reply, so the server does not send
-                            // "goodbye" and the audio channel stays open. The device therefore
-                            // remains in the listening state (solid green) instead of dropping
-                            // to idle -> connecting.
-                            Application::GetInstance().SetListeningMode(kListeningModeManualStop);
+                            // Let HandleToggleChatEvent() open the audio channel through
+                            // the standard Connecting state. Do NOT call
+                            // SetListeningMode() here: it would jump straight to
+                            // Listening without a hello/session_id/UDP handshake,
+                            // and the toggle would then close the channel at once.
                             Application::GetInstance().ToggleChatState();
                         }
                     }
