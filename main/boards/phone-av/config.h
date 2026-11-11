@@ -19,7 +19,12 @@
 #define PHONE_AV_PORT 4444
 
 #define PHONE_AV_MIC_PATH      "/audio/pcm"
-#define PHONE_AV_SPEAKER_PATH "/audio/upload"
+/* The phone app exposes /audio/upload/16000 for 16 kHz mono PCM and
+ * /audio/upload for 44.1 kHz. AUDIO_OUTPUT_SAMPLE_RATE is 16000, so using the
+ * plain /audio/upload would make the phone's AudioTrack consume the stream
+ * 2.75x too fast (underrun / no audible sound). See
+ * StreamingServerHelper.kt handleTalkUpload(). */
+#define PHONE_AV_SPEAKER_PATH "/audio/upload/16000"
 #define PHONE_AV_SNAPSHOT_PATH "/video/snapshot"
 
 #define BUILTIN_LED_GPIO GPIO_NUM_48
