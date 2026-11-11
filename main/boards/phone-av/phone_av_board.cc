@@ -592,10 +592,11 @@ private:
     std::string explain_token_;
 };
 
-// The dev-board RGB (GPIO 48) is wired in RGB order while SingleLed drives it as
-// GRB, so the framework's "red" channel reads as green on this board. The stock
-// listening state also breathes/flickers with voice detection, which looks like a
-// blinking green light. Use a custom LED that stays solid and is off when idle.
+// The dev-board RGB (GPIO 48) is a standard GRB SK6812/WS2812. SingleLed drives
+// it as GRB too, so SetColor(r,g,b) maps directly: (0,4,0) -> green, (0,0,4) ->
+// blue, (4,0,0) -> red. The stock listening state also breathes/flickers with
+// voice detection, which looks like a blinking light. Use a custom LED that stays
+// solid and is off when idle.
 class PhoneAvLed : public SingleLed {
 public:
     explicit PhoneAvLed(gpio_num_t gpio) : SingleLed(gpio) {}
@@ -608,9 +609,8 @@ public:
                 break;
             case kDeviceStateListening:
             case kDeviceStateAudioTesting:
-                // Solid green (the red channel reads green here); no voice-detection
-                // brightness flicker.
-                SetColor(4, 0, 0);
+                // Solid green.
+                SetColor(0, 4, 0);
                 TurnOn();
                 break;
             case kDeviceStateSpeaking:
