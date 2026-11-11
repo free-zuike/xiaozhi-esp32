@@ -541,10 +541,16 @@ private:
 class NetworkAudioCodec : public AudioCodec {
 public:
     NetworkAudioCodec(int input_sample_rate, int output_sample_rate)
-        : mic_buffer_(kMicBufferSamples), speaker_buffer_(kSpeakerBufferSamples) {
+        : mic_buffer_(kMicBufferSamples), speaker_buffer_(kSpeakerBufferSamples),
+          ref_buffer_(kRefBufferSamples) {
         duplex_ = true;
-        input_reference_ = false;
-        input_channels_ = 1;
+        // Enable AEC through a cached playback reference. The device knows exactly
+        // what it sent to the phone speaker, so feed that as the AEC reference
+        // channel (ch1) alongside the mic (ch0). This cancels the acoustic echo
+        // of our own TTS that the phone mic captures and streams back -- the
+        // self-QA feedback loop the user is seeing.
+        input_reference_ = true;
+        input_channels_ = input_reference_ ? 2 : 1;
         output_channels_ = 1;
         input_sample_rate_ = input_sample_rate;
         output_sample_rate_ = output_sample_rate;
@@ -570,6 +576,8 @@ public:
         if (dest == nullptr || samples <= 0) {
             return 0;
         }
+        const int channels = input_channels_;           // 1 (mic) or 2 (mic + AEC ref)
+        const int frames = samples / channels;
         // Pace this read to the real audio rate. The upstream AudioService audio_input
         // task calls Read() in a tight loop with no internal delay; for a real I2S mic the
         // codec blocks until realtime samples arrive, which naturally paces the loop.
@@ -582,17 +590,43 @@ public:
         const TickType_t now = xTaskGetTickCount();
         if (last_read_tick_ != 0) {
             const TickType_t expected =
-                last_read_tick_ + pdMS_TO_TICKS(samples * 1000 / input_sample_rate_);
+                last_read_tick_ + pdMS_TO_TICKS(frames * 1000 / input_sample_rate_);
             if ((int32_t)(expected - now) > 0) {
                 vTaskDelay(expected - now);
             }
         }
         last_read_tick_ = xTaskGetTickCount();
 
-        std::size_t requested = static_cast<std::size_t>(samples);
-        std::size_t got = mic_buffer_.Pop(dest, requested);
-        if (got < requested) {
-            std::memset(dest + got, 0, (requested - got) * sizeof(int16_t));
+        // Self-QA suppression: while we are playing, and for a short window after the
+        // last speaker sample, zero the mic so the delayed echo of our own TTS cannot
+        // be captured and trigger a new turn.
+        const bool muted =
+            (xTaskGetTickCount() - last_speaker_tick_) < pdMS_TO_TICKS(kPostSpeechMuteMs);
+
+        if (channels == 1) {
+            std::size_t requested = static_cast<std::size_t>(frames);
+            std::size_t got = mic_buffer_.Pop(dest, requested);
+            if (got < requested) {
+                std::memset(dest + got, 0, (requested - got) * sizeof(int16_t));
+            }
+            return samples;
+        }
+
+        // Interleaved [mic, ref] for AEC. The ref is the playback we sent to the phone,
+        // consumed at the same rate it was produced, so it stays time-aligned with the
+        // echo arriving at the mic.
+        std::vector<int16_t> mic(frames);
+        std::size_t got = mic_buffer_.Pop(mic.data(), static_cast<std::size_t>(frames));
+        if (got < static_cast<std::size_t>(frames)) {
+            std::memset(mic.data() + got, 0, (frames - got) * sizeof(int16_t));
+        }
+        if (muted) {
+            std::memset(mic.data(), 0, frames * sizeof(int16_t));
+        }
+        int i = 0;
+        for (int f = 0; f < frames; ++f) {
+            dest[i++] = mic[f];
+            dest[i++] = PopRef();
         }
         return samples;
     }
@@ -602,6 +636,11 @@ public:
             return 0;
         }
         speaker_buffer_.Push(data, static_cast<std::size_t>(samples));
+        // Keep a sliding window of the most recent playback as the AEC reference.
+        if (input_reference_) {
+            PushRef(data, samples);
+        }
+        last_speaker_tick_ = xTaskGetTickCount();
         return samples;
     }
 
@@ -626,7 +665,13 @@ public:
     private:
     static constexpr std::size_t kMicBufferSamples = 16000;      // 1 s @ 16 kHz
     static constexpr std::size_t kSpeakerBufferSamples = 32000;  // 2 s @ 16 kHz
+    static constexpr std::size_t kRefBufferSamples = 16000;      // 1 s @ 16 kHz playback ref
     static constexpr std::size_t kHttpReadSize = 1024;
+    // After the last speaker sample, keep the mic zeroed for this long so the
+    // delayed acoustic echo of our own TTS (phone speaker -> phone mic -> us) is
+    // not captured and mistaken for user speech. ESP-SR AEC tolerates only a
+    // limited echo-path delay, so this mute is the reliable backstop for the loop.
+    static constexpr TickType_t kPostSpeechMuteMs = 600;
     // A POST every 20 ms saturated the ESP32 with TCP handshakes and starved
     // the phone's AudioTrack. Batch 100 ms of PCM per request instead.
     static constexpr std::size_t kPostSamples = 1600;
@@ -665,6 +710,34 @@ public:
         if (count > 0) {
             mic_buffer_.Push(samples, count);
         }
+    }
+
+    // AEC reference: a sliding window of the most recent playback samples. Read()
+    // consumes it at the same rate it was produced, so it stays time-aligned with
+    // the acoustic echo the phone mic captures and streams back.
+    void PushRef(const int16_t* data, int samples) {
+        if (write_pos_ - read_pos_ + samples > static_cast<int>(ref_buffer_.size())) {
+            read_pos_ = write_pos_ + samples - static_cast<int>(ref_buffer_.size());
+        }
+        if (read_pos_ != 0) {
+            if (write_pos_ != read_pos_) {
+                std::memmove(ref_buffer_.data(), ref_buffer_.data() + read_pos_,
+                             (write_pos_ - read_pos_) * sizeof(int16_t));
+            }
+            write_pos_ -= read_pos_;
+            read_pos_ = 0;
+        }
+        std::memcpy(&ref_buffer_[write_pos_], data,
+                    static_cast<std::size_t>(samples) * sizeof(int16_t));
+        write_pos_ += samples;
+    }
+
+    int16_t PopRef() {
+        if (read_pos_ >= write_pos_) {
+            read_pos_ = write_pos_ = 0;
+            return 0;
+        }
+        return ref_buffer_[read_pos_++];
     }
 
     void MicTask() {
@@ -804,9 +877,13 @@ public:
 
     PcmRingBuffer mic_buffer_;
     PcmRingBuffer speaker_buffer_;
+    std::vector<int16_t> ref_buffer_;
+    int read_pos_ = 0;
+    int write_pos_ = 0;
     std::atomic<bool> started_{false};
     std::atomic<bool> running_{false};
     TickType_t last_read_tick_{0};
+    TickType_t last_speaker_tick_{0};
     int zero_read_count_ = 0;
     std::atomic<bool> mic_connected_{false};
     std::atomic<uint32_t> mic_connect_count_{0};
