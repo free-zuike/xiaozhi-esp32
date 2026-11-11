@@ -446,6 +446,10 @@ void StartPhoneAvConfigServer() {
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kPhoneAvConfigPort;
+    // The config-page handlers call into the display/assets path, which needs
+    // more stack than the 4 KB httpd default; otherwise the httpd task overflows
+    // and the board reboots in a loop right after connecting to WiFi.
+    config.stack_size = 16 * 1024;
     config.max_uri_handlers = 8;
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &config) != ESP_OK) {
