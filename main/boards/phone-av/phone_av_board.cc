@@ -29,10 +29,14 @@
 #include <esp_log.h>
 #include <esp_netif.h>
 #include <esp_system.h>
+#include <esp_reset_reason.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #define TAG "PhoneAvBoard"
+
+// Diagnostics endpoint handler; defined below (after PhoneAvBoard is complete).
+esp_err_t PhoneAvStatusHandler(httpd_req_t* req);
 
 namespace {
 
@@ -159,7 +163,7 @@ void StartPhoneAvConfigServer() {
     }
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = kPhoneAvConfigPort;
-    config.max_uri_handlers = 4;
+    config.max_uri_handlers = 5;
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start phone-av config server");
@@ -180,6 +184,11 @@ void StartPhoneAvConfigServer() {
     httpd_register_uri_handler(server, &root_uri);
     httpd_register_uri_handler(server, &host_uri);
     httpd_register_uri_handler(server, &set_uri);
+    httpd_uri_t status_uri = {
+        .uri = "/status", .method = HTTP_GET,
+        .handler = PhoneAvStatusHandler, .user_ctx = nullptr,
+    };
+    httpd_register_uri_handler(server, &status_uri);
 
     esp_netif_t* netif = esp_netif_get_default_netif();
     esp_netif_ip_info_t info{};
@@ -317,6 +326,8 @@ public:
     // auto-listen logic uses this to avoid entering a chat session (and blinking
     // the LED) when the phone app that provides the mic/speaker is not running.
     bool IsPhoneMicConnected() const { return mic_connected_; }
+    uint32_t MicConnectCount() const { return mic_connect_count_; }
+    uint32_t MicDisconnectCount() const { return mic_disconnect_count_; }
 
     private:
     static constexpr std::size_t kBufferSamples = 16000;
@@ -389,6 +400,7 @@ public:
             }
 
             mic_connected_ = true;
+            mic_connect_count_++;
             pending_valid = false;
             zero_read_count_ = 0;
             while (running_ && PhoneAvNetworkReady()) {
@@ -422,6 +434,7 @@ public:
             }
             http->Close();
             mic_connected_ = false;
+            mic_disconnect_count_++;
             // The phone mic just dropped. If we were actively listening on it,
             // leave the chat session so the device returns to idle (LED off)
             // instead of sitting in a dead "listening" state with no audio.
@@ -477,6 +490,8 @@ public:
     TickType_t last_read_tick_{0};
     int zero_read_count_ = 0;
     std::atomic<bool> mic_connected_{false};
+    std::atomic<uint32_t> mic_connect_count_{0};
+    std::atomic<uint32_t> mic_disconnect_count_{0};
     };
 
 class NetworkCamera : public Camera {
@@ -696,6 +711,22 @@ public:
         return network_ready_.load();
     }
 
+    bool IsPhoneMicConnected() const {
+        auto* codec = static_cast<NetworkAudioCodec*>(GetAudioCodec());
+        return codec != nullptr && codec->IsPhoneMicConnected();
+    }
+    uint32_t MicConnectCount() const {
+        auto* codec = static_cast<NetworkAudioCodec*>(GetAudioCodec());
+        return codec != nullptr ? codec->MicConnectCount() : 0;
+    }
+    uint32_t MicDisconnectCount() const {
+        auto* codec = static_cast<NetworkAudioCodec*>(GetAudioCodec());
+        return codec != nullptr ? codec->MicDisconnectCount() : 0;
+    }
+    uint32_t UptimeMs() const {
+        return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+    }
+
     virtual AudioCodec* GetAudioCodec() override {
         static NetworkAudioCodec codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE);
         return &codec;
@@ -719,6 +750,59 @@ private:
 
 bool PhoneAvNetworkReady() {
     return static_cast<PhoneAvBoard&>(Board::GetInstance()).IsNetworkReady();
+}
+
+esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
+    auto& app = Application::GetInstance();
+    DeviceState state = app.GetDeviceState();
+
+    const char* state_str = "unknown";
+    switch (state) {
+        case kDeviceStateIdle:         state_str = "idle"; break;
+        case kDeviceStateListening:    state_str = "listening"; break;
+        case kDeviceStateSpeaking:     state_str = "speaking"; break;
+        case kDeviceStateConnecting:   state_str = "connecting"; break;
+        case kDeviceStateActivating:   state_str = "activating"; break;
+        case kDeviceStateUpgrading:    state_str = "upgrading"; break;
+        case kDeviceStateNotifying:    state_str = "notifying"; break;
+        case kDeviceStateAudioTesting: state_str = "audio_testing"; break;
+        default:                      state_str = "unknown"; break;
+    }
+
+    auto* board = static_cast<PhoneAvBoard*>(&Board::GetInstance());
+    const bool mic = board->IsPhoneMicConnected();
+    const bool net = board->IsNetworkReady();
+    const bool voice = app.IsVoiceDetected();
+    const uint32_t mc = board->MicConnectCount();
+    const uint32_t md = board->MicDisconnectCount();
+    const uint32_t up = board->UptimeMs();
+
+    const char* rr = "unknown";
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   rr = "poweron"; break;
+        case ESP_RST_SW:        rr = "software"; break;
+        case ESP_RST_PANIC:     rr = "panic"; break;
+        case ESP_RST_INT_WDT:   rr = "int_wdt"; break;
+        case ESP_RST_TASK_WDT:  rr = "task_wdt"; break;
+        case ESP_RST_WDT:       rr = "wdt"; break;
+        case ESP_RST_DEEPSLEEP: rr = "deepsleep"; break;
+        case ESP_RST_BROWNOUT:  rr = "brownout"; break;
+        case ESP_RST_SDIO:      rr = "sdio"; break;
+        default:                rr = "unknown"; break;
+    }
+
+    std::string body = std::string("{\n") +
+        "  \"state\": \"" + state_str + "\",\n" +
+        "  \"voice_detected\": " + (voice ? "true" : "false") + ",\n" +
+        "  \"phone_mic_connected\": " + (mic ? "true" : "false") + ",\n" +
+        "  \"network_ready\": " + (net ? "true" : "false") + ",\n" +
+        "  \"mic_connect_count\": " + std::to_string(mc) + ",\n" +
+        "  \"mic_disconnect_count\": " + std::to_string(md) + ",\n" +
+        "  \"uptime_ms\": " + std::to_string(up) + ",\n" +
+        "  \"reset_reason\": \"" + rr + "\"\n" +
+        "}";
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    return httpd_resp_send(req, body.c_str(), HTTPD_RESP_USE_STRLEN);
 }
 
 }  // namespace
