@@ -1,4 +1,5 @@
 #include "wifi_board.h"
+#include "button.h"
 #include "audio_codec.h"
 #include "camera.h"
 #include "config.h"
@@ -643,7 +644,21 @@ public:
 
 class PhoneAvBoard : public WifiBoard {
 public:
-    PhoneAvBoard() {
+    PhoneAvBoard() : boot_button_(BOOT_BUTTON_GPIO) {
+        // Standard xiaozhi behaviour: a tap on the BOOT button enters WiFi
+        // config mode while the device is still starting (so you can re-bind /
+        // factory-reset from the captive portal at http://192.168.4.1), and
+        // toggles the chat during normal operation. Without this the board has
+        // no way to reach the setup page (port 80 is not otherwise reachable).
+        boot_button_.OnClick([this]() {
+            auto& app = Application::GetInstance();
+            if (app.GetDeviceState() == kDeviceStateStarting) {
+                EnterWifiConfigMode();
+                return;
+            }
+            app.ToggleChatState();
+        });
+
         // This dev board has a green "TX" activity LED wired to the USB-serial
         // bridge on ESP32 UART0. It blinks with every log line we print, which
         // looks like a distracting green blink. Silence the console so the light
@@ -745,6 +760,7 @@ private:
     std::atomic<bool> network_ready_{false};
     NetworkEventCallback user_network_event_callback_;
     esp_timer_handle_t auto_listen_timer_{nullptr};
+    Button boot_button_;
 };
 
 bool PhoneAvNetworkReady() {
