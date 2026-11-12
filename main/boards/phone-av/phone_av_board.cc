@@ -546,6 +546,11 @@ public:
         return count;
     }
 
+    std::size_t Available() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return count_;
+    }
+
 private:
     std::vector<int16_t> buffer_;
     std::size_t capacity_;
@@ -689,10 +694,16 @@ public:
     // not captured and mistaken for user speech. ESP-SR AEC tolerates only a
     // limited echo-path delay, so this mute is the reliable backstop for the loop.
     static constexpr TickType_t kPostSpeechMuteMs = 600;
-    // A POST every 20 ms saturated the ESP32 with TCP handshakes and starved
-    // the phone's AudioTrack. Batch 100 ms of PCM per request instead.
-    static constexpr std::size_t kPostSamples = 1600;
-    static constexpr std::size_t kPostFlushMs = 100;
+    // Batch PCM per POST to amortize the per-request TCP/HTTP overhead. Each
+    // POST opens a fresh connection, so sending 100 ms batches (~10/s) left the
+    // link below realtime and the phone's AudioTrack underran -> stutter. Batching
+    // ~500-600 ms per request keeps throughput at realtime while bounding latency.
+    // kPostSamples is the cap; kPostFlushMs is how long we wait to accumulate
+    // before flushing when audio arrives slower than realtime; the first batch
+    // after an idle gap uses kLowLatencyFlushMs so speech starts promptly.
+    static constexpr std::size_t kPostSamples = 16000;       // 1 s cap @ 16 kHz
+    static constexpr std::size_t kPostFlushMs = 600;          // steady-state flush window
+    static constexpr std::size_t kLowLatencyFlushMs = 120;    // first batch after idle
 
     static void MicTaskEntry(void* arg) {
         auto* codec = static_cast<NetworkAudioCodec*>(arg);
@@ -852,20 +863,25 @@ public:
 
     void SpeakerTask() {
         const std::string url = PhoneAvUrl(PHONE_AV_SPEAKER_PATH);
-        int16_t chunk[kPostSamples];
         while (running_) {
             if (!PhoneAvNetworkReady()) {
                 vTaskDelay(pdMS_TO_TICKS(500));
                 continue;
             }
-            // Accumulate up to kPostSamples (100 ms) before one POST. The decoded
-            // TTS arrives as 20 ms frames; sending each frame separately meant
-            // ~50 TCP handshakes per second, and any slow round trip made the
-            // 1-second ring buffer overflow and silently drop audio.
+            // Accumulate PCM before one POST. The decoded TTS arrives as 20 ms
+            // frames; sending each frame separately meant ~50 TCP handshakes per
+            // second and any slow round trip made the ring buffer overflow and
+            // drop audio. Batching ~kPostFlushMs of audio per request amortizes
+            // the per-POST TCP/HTTP overhead so the link sustains realtime
+            // throughput (otherwise the phone's AudioTrack underruns -> stutter).
+            // The first batch after an idle gap flushes quickly (low latency) so
+            // speech starts promptly; later batches batch longer for efficiency.
+            const bool was_empty = speaker_buffer_.Available() == 0;
+            const TickType_t flush_ms = was_empty ? kLowLatencyFlushMs : kPostFlushMs;
             std::size_t count = 0;
-            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(kPostFlushMs);
+            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(flush_ms);
             while (count < kPostSamples && running_) {
-                count += speaker_buffer_.Pop(chunk + count, kPostSamples - count);
+                count += speaker_buffer_.Pop(speak_chunk_.data() + count, kPostSamples - count);
                 if (count >= kPostSamples || xTaskGetTickCount() >= deadline) {
                     break;
                 }
@@ -877,10 +893,10 @@ public:
             // A failed POST used to discard the popped samples outright. Retry
             // once with the same buffer so a transient network hiccup does not
             // punch a hole in the playback.
-            bool ok = PostPcm(url, chunk, count);
+            bool ok = PostPcm(url, speak_chunk_.data(), count);
             if (!ok) {
                 vTaskDelay(pdMS_TO_TICKS(20));
-                ok = PostPcm(url, chunk, count);
+                ok = PostPcm(url, speak_chunk_.data(), count);
             }
             if (ok) {
                 speaker_post_ok_.fetch_add(1);
@@ -895,6 +911,10 @@ public:
     PcmRingBuffer mic_buffer_;
     PcmRingBuffer speaker_buffer_;
     std::vector<int16_t> ref_buffer_;
+    // Reusable send buffer for SpeakerTask. Sized at kPostSamples (1 s); kept as a
+    // member (heap) rather than a stack local so it never overflows the 8 KB task
+    // stack when the batch cap is large.
+    std::vector<int16_t> speak_chunk_{kPostSamples};
     int read_pos_ = 0;
     int write_pos_ = 0;
     std::atomic<bool> started_{false};
