@@ -557,7 +557,7 @@ private:
     std::size_t read_pos_ = 0;
     std::size_t write_pos_ = 0;
     std::size_t count_ = 0;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
 };
 
 class NetworkAudioCodec : public AudioCodec {
