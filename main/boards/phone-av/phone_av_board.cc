@@ -619,12 +619,6 @@ public:
         }
         last_read_tick_ = xTaskGetTickCount();
 
-        // Self-QA suppression: while we are playing, and for a short window after the
-        // last speaker sample, zero the mic so the delayed echo of our own TTS cannot
-        // be captured and trigger a new turn.
-        const bool muted =
-            (xTaskGetTickCount() - last_speaker_tick_) < pdMS_TO_TICKS(kPostSpeechMuteMs);
-
         if (channels == 1) {
             std::size_t requested = static_cast<std::size_t>(frames);
             std::size_t got = mic_buffer_.Pop(dest, requested);
@@ -641,9 +635,6 @@ public:
         std::size_t got = mic_buffer_.Pop(mic.data(), static_cast<std::size_t>(frames));
         if (got < static_cast<std::size_t>(frames)) {
             std::memset(mic.data() + got, 0, (frames - got) * sizeof(int16_t));
-        }
-        if (muted) {
-            std::memset(mic.data(), 0, frames * sizeof(int16_t));
         }
         int i = 0;
         for (int f = 0; f < frames; ++f) {
@@ -662,7 +653,6 @@ public:
         if (input_reference_) {
             PushRef(data, samples);
         }
-        last_speaker_tick_ = xTaskGetTickCount();
         return samples;
     }
 
@@ -689,11 +679,6 @@ public:
     static constexpr std::size_t kSpeakerBufferSamples = 32000;  // 2 s @ 16 kHz
     static constexpr std::size_t kRefBufferSamples = 16000;      // 1 s @ 16 kHz playback ref
     static constexpr std::size_t kHttpReadSize = 1024;
-    // After the last speaker sample, keep the mic zeroed for this long so the
-    // delayed acoustic echo of our own TTS (phone speaker -> phone mic -> us) is
-    // not captured and mistaken for user speech. ESP-SR AEC tolerates only a
-    // limited echo-path delay, so this mute is the reliable backstop for the loop.
-    static constexpr TickType_t kPostSpeechMuteMs = 600;
     // Batch PCM per POST to amortize the per-request TCP/HTTP overhead. Each
     // POST opens a fresh connection, so sending 100 ms batches (~10/s) left the
     // link below realtime and the phone's AudioTrack underran -> stutter. Batching
@@ -920,7 +905,6 @@ public:
     std::atomic<bool> started_{false};
     std::atomic<bool> running_{false};
     TickType_t last_read_tick_{0};
-    TickType_t last_speaker_tick_{0};
     int zero_read_count_ = 0;
     std::atomic<bool> mic_connected_{false};
     std::atomic<uint32_t> mic_connect_count_{0};
