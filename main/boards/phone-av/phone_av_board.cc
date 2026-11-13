@@ -571,7 +571,14 @@ public:
         // channel (ch1) alongside the mic (ch0). This cancels the acoustic echo
         // of our own TTS that the phone mic captures and streams back -- the
         // self-QA feedback loop the user is seeing.
-        input_reference_ = true;
+        // Firmware AEC was enabled here (a149bccb) by feeding the playback as the
+        // AEC reference. That makes esp-sr's create_from_config init AEC
+        // (FD_LOW_COST) during AfeAudioEngine::Initialize, which crashes this build's
+        // esp-sr (StoreProhibited inside the AFE creation, not a stack overflow) and
+        // also blows app_main's stack. The phone app already runs its own
+        // AcousticEchoCanceler, so the firmware AEC is redundant -- disable it so the
+        // AFE is created single-channel (mic only) and the device boots/stays up.
+        input_reference_ = false;
         input_channels_ = input_reference_ ? 2 : 1;
         output_channels_ = 1;
         input_sample_rate_ = input_sample_rate;
