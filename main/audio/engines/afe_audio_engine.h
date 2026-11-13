@@ -63,7 +63,7 @@ private:
     // idle but rebooted as soon as it began listening). The sibling wake-word encode
     // task already uses 4096*6 = 24576; match it (and add headroom) from SPIRAM
     // (the stack is heap_caps_malloc'd with MALLOC_CAP_SPIRAM, so 32 KB is cheap).
-    static constexpr size_t kProcessingTaskStackSize = 32768;
+    static constexpr size_t kProcessingTaskStackSize = 65536;
 
     AudioCodec* codec_ = nullptr;
     srmodel_list_t* models_ = nullptr;
