@@ -54,6 +54,7 @@ jobs:
         run: |
           mkdir -p dist
           cp build/merged-binary.bin "dist/${BOARD}_${SHA}.bin"
+          cp build/*.elf dist/ 2>/dev/null || true
           sha256sum dist/*.bin > dist/SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v7
