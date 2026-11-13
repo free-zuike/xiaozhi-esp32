@@ -56,12 +56,6 @@ private:
     static constexpr EventBits_t kWakeWordEnabled = 1 << 0;
     static constexpr EventBits_t kVoiceProcessingEnabled = 1 << 1;
     static constexpr EventBits_t kAfeActive = 1 << 2;
-    // The AFE processing task runs the full esp-sr pipeline (AEC + VAD + WakeNet /
-    // speech detection). The stack is heap_caps_malloc'd with MALLOC_CAP_SPIRAM.
-    // NOTE: a task whose stack lives in external SPIRAM can only be interrupted
-    // safely if CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY is enabled; otherwise an
-    // ISR running on this stack may fault. Boards that actually create the AFE must
-    // ensure that, or allocate this stack from internal DRAM instead.
     static constexpr size_t kProcessingTaskStackSize = 4096;
 
     AudioCodec* codec_ = nullptr;

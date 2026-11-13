@@ -566,17 +566,11 @@ public:
         : mic_buffer_(kMicBufferSamples), speaker_buffer_(kSpeakerBufferSamples),
           ref_buffer_(kRefBufferSamples) {
         duplex_ = true;
-        // Firmware AEC is disabled (was enabled in a149bccb). On-device audio
-        // processing is turned off for phone-av at the build level
-        // (CONFIG_USE_AUDIO_PROCESSOR=n in config.json) because this board ships
-        // with no esp-sr model and the shared AFE engine creates an AFE_TYPE_FD
-        // instance that StoreProhibits in fetch_with_delay without a model. With the
-        // AFE disabled the engine returns early and streams raw mic PCM to the cloud
-        // (which does VAD/ASR); the phone app already runs its own
-        // AcousticEchoCanceler, so a firmware AEC reference is redundant. Keep
-        // input_reference_ = false so that re-enabling USE_AUDIO_PROCESSOR later
-        // (e.g. after flashing a model) does not immediately re-trigger the crash.
-        input_reference_ = false;
+        // Feed the playback we sent to the phone back as the AFE's echo reference
+        // (ch1 alongside the mic on ch0). This is the configuration verified
+        // stable on this board; the phone app has its own AcousticEchoCanceler,
+        // so the two are complementary.
+        input_reference_ = true;
         input_channels_ = input_reference_ ? 2 : 1;
         output_channels_ = 1;
         input_sample_rate_ = input_sample_rate;
@@ -590,10 +584,9 @@ public:
         }
         running_ = true;
         // These tasks run the ESP HTTP client (connect + DNS + TCP) synchronously
-        // inside the codec, on top of the AEC/codec call chain. 8 KB overflowed
-        // the stack and the board rebooted in a loop the moment audio started
-        // (stack overflow in task phone_av_mic / phone_av_spk). Match the httpd
-        // fix (config.stack_size = 16 KB) and give extra headroom: 24 KB.
+        // inside the codec. Give them generous headroom (the httpd task needs
+        // 16 KB for the same reasons); 24 KB keeps TLS/HTTP stacks comfortably
+        // inside the budget.
         BaseType_t mic_result = xTaskCreate(MicTaskEntry, "phone_av_mic", 24576, this, 5, nullptr);
         BaseType_t speaker_result = xTaskCreate(SpeakerTaskEntry, "phone_av_spk", 24576, this, 5, nullptr);
         if (mic_result != pdPASS || speaker_result != pdPASS) {
@@ -907,9 +900,13 @@ public:
     PcmRingBuffer speaker_buffer_;
     std::vector<int16_t> ref_buffer_;
     // Reusable send buffer for SpeakerTask. Sized at kPostSamples (1 s); kept as a
-    // member (heap) rather than a stack local so it never overflows the 8 KB task
-    // stack when the batch cap is large.
-    std::vector<int16_t> speak_chunk_{kPostSamples};
+    // member (heap) rather than a stack local so it never overflows the task stack.
+    // IMPORTANT: use the size constructor, NOT braces. std::vector<int16_t>{16000}
+    // selects initializer_list<int16_t> (16000 fits in int16_t), producing a
+    // 1-element vector; SpeakerTask then writes up to 16000 int16 into that 2-byte
+    // allocation, smashing neighbouring heap blocks (FreeRTOS TCBs live there)
+    // with PCM data and rebooting in vPortYieldFromInt with a StoreProhibited.
+    std::vector<int16_t> speak_chunk_ = std::vector<int16_t>(kPostSamples, 0);
     int read_pos_ = 0;
     int write_pos_ = 0;
     std::atomic<bool> started_{false};

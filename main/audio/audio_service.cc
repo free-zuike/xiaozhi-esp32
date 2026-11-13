@@ -139,7 +139,7 @@ void AudioService::Start() {
             audio_service->AudioOutputTask();
             vTaskDelete(NULL);
         },
-        "audio_output", 2048 * 8, this, 4, &audio_output_task_handle_);
+        "audio_output", 2048 * 2, this, 4, &audio_output_task_handle_);
 #else
     /* Start the audio input task */
     xTaskCreate(
@@ -148,7 +148,7 @@ void AudioService::Start() {
             audio_service->AudioInputTask();
             vTaskDelete(NULL);
         },
-        "audio_input", 2048 * 4, this, 8, &audio_input_task_handle_);
+        "audio_input", 2048 * 2, this, 8, &audio_input_task_handle_);
 
     /* Start the audio output task */
     xTaskCreate(
@@ -157,7 +157,7 @@ void AudioService::Start() {
             audio_service->AudioOutputTask();
             vTaskDelete(NULL);
         },
-        "audio_output", 2048 * 8, this, 4, &audio_output_task_handle_);
+        "audio_output", 2048, this, 4, &audio_output_task_handle_);
 #endif
 
     /* Start the opus codec task */
