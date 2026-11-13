@@ -584,8 +584,13 @@ public:
             return;
         }
         running_ = true;
-        BaseType_t mic_result = xTaskCreate(MicTaskEntry, "phone_av_mic", 8192, this, 5, nullptr);
-        BaseType_t speaker_result = xTaskCreate(SpeakerTaskEntry, "phone_av_spk", 8192, this, 5, nullptr);
+        // These tasks run the ESP HTTP client (connect + DNS + TCP) synchronously
+        // inside the codec, on top of the AEC/codec call chain. 8 KB overflowed
+        // the stack and the board rebooted in a loop the moment audio started
+        // (stack overflow in task phone_av_mic / phone_av_spk). Match the httpd
+        // fix (config.stack_size = 16 KB) and give extra headroom: 24 KB.
+        BaseType_t mic_result = xTaskCreate(MicTaskEntry, "phone_av_mic", 24576, this, 5, nullptr);
+        BaseType_t speaker_result = xTaskCreate(SpeakerTaskEntry, "phone_av_spk", 24576, this, 5, nullptr);
         if (mic_result != pdPASS || speaker_result != pdPASS) {
             ESP_LOGE(TAG, "Failed to create phone-av network audio tasks");
         } else {
