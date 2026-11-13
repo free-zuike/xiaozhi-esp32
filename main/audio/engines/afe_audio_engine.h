@@ -57,13 +57,12 @@ private:
     static constexpr EventBits_t kVoiceProcessingEnabled = 1 << 1;
     static constexpr EventBits_t kAfeActive = 1 << 2;
     // The AFE processing task runs the full esp-sr pipeline (AEC + VAD + WakeNet /
-    // speech detection). 4 KB overflowed its stack the moment it started processing
-    // real audio, corrupting the saved interrupt context and crashing the chip with
-    // a StoreProhibited inside vPortYieldFromInt (the board looked "stable" while
-    // idle but rebooted as soon as it began listening). The sibling wake-word encode
-    // task already uses 4096*6 = 24576; match it (and add headroom) from SPIRAM
-    // (the stack is heap_caps_malloc'd with MALLOC_CAP_SPIRAM, so 32 KB is cheap).
-    static constexpr size_t kProcessingTaskStackSize = 65536;
+    // speech detection). The stack is heap_caps_malloc'd with MALLOC_CAP_SPIRAM.
+    // NOTE: a task whose stack lives in external SPIRAM can only be interrupted
+    // safely if CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY is enabled; otherwise an
+    // ISR running on this stack may fault. Boards that actually create the AFE must
+    // ensure that, or allocate this stack from internal DRAM instead.
+    static constexpr size_t kProcessingTaskStackSize = 4096;
 
     AudioCodec* codec_ = nullptr;
     srmodel_list_t* models_ = nullptr;

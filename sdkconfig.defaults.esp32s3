@@ -41,12 +41,3 @@ CONFIG_LV_USE_SNAPSHOT=y
 CONFIG_LV_USE_BUILTIN_MALLOC=y
 # CONFIG_LV_USE_CLIB_MALLOC is not set
 CONFIG_LV_MEM_SIZE_KILOBYTES=1024
-
-# Diagnostics / stability: the phone-av board enables AEC in the AFE, which makes
-# esp-sr AFE creation (AfeAudioEngine::Initialize -> create_from_config) run heavy
-# stack work. That call happens inside app_main's stack, whose default (4 KB) was
-# overflowed -> StoreProhibited inside vPortYieldFromInt. Bump the main task stack
-# and keep FreeRTOS stack-overflow checks on (prints the offending task name on a
-# real overflow) to surface any residual overflow instead of crashing silently.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
-CONFIG_FREERTOS_CHECK_STACKOVERFLOW=2

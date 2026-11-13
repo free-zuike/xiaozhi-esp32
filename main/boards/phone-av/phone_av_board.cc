@@ -566,18 +566,16 @@ public:
         : mic_buffer_(kMicBufferSamples), speaker_buffer_(kSpeakerBufferSamples),
           ref_buffer_(kRefBufferSamples) {
         duplex_ = true;
-        // Enable AEC through a cached playback reference. The device knows exactly
-        // what it sent to the phone speaker, so feed that as the AEC reference
-        // channel (ch1) alongside the mic (ch0). This cancels the acoustic echo
-        // of our own TTS that the phone mic captures and streams back -- the
-        // self-QA feedback loop the user is seeing.
-        // Firmware AEC was enabled here (a149bccb) by feeding the playback as the
-        // AEC reference. That makes esp-sr's create_from_config init AEC
-        // (FD_LOW_COST) during AfeAudioEngine::Initialize, which crashes this build's
-        // esp-sr (StoreProhibited inside the AFE creation, not a stack overflow) and
-        // also blows app_main's stack. The phone app already runs its own
-        // AcousticEchoCanceler, so the firmware AEC is redundant -- disable it so the
-        // AFE is created single-channel (mic only) and the device boots/stays up.
+        // Firmware AEC is disabled (was enabled in a149bccb). On-device audio
+        // processing is turned off for phone-av at the build level
+        // (CONFIG_USE_AUDIO_PROCESSOR=n in config.json) because this board ships
+        // with no esp-sr model and the shared AFE engine creates an AFE_TYPE_FD
+        // instance that StoreProhibits in fetch_with_delay without a model. With the
+        // AFE disabled the engine returns early and streams raw mic PCM to the cloud
+        // (which does VAD/ASR); the phone app already runs its own
+        // AcousticEchoCanceler, so a firmware AEC reference is redundant. Keep
+        // input_reference_ = false so that re-enabling USE_AUDIO_PROCESSOR later
+        // (e.g. after flashing a model) does not immediately re-trigger the crash.
         input_reference_ = false;
         input_channels_ = input_reference_ ? 2 : 1;
         output_channels_ = 1;
