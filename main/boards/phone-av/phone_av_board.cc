@@ -873,7 +873,11 @@ public:
                 if (count >= kPostSamples || xTaskGetTickCount() >= deadline) {
                     break;
                 }
-                vTaskDelay(pdMS_TO_TICKS(5));
+                // Must be >= one tick: with the default CONFIG_FREERTOS_HZ=100,
+                // pdMS_TO_TICKS(5) rounds down to 0, so vTaskDelay(0) does not
+                // yield and this accumulation loop busy-waits (starving IDLE0 and
+                // triggering the task watchdog while the phone app is idle).
+                vTaskDelay(pdMS_TO_TICKS(10));
             }
             if (count == 0) {
                 continue;
