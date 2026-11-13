@@ -41,3 +41,7 @@ CONFIG_LV_USE_SNAPSHOT=y
 CONFIG_LV_USE_BUILTIN_MALLOC=y
 # CONFIG_LV_USE_CLIB_MALLOC is not set
 CONFIG_LV_MEM_SIZE_KILOBYTES=1024
+
+# Diagnostics: surface any residual stack overflow (prints the offending task
+# name) instead of crashing silently with a corrupted interrupt context.
+CONFIG_FREERTOS_CHECK_STACKOVERFLOW=2
