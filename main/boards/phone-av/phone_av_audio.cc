@@ -742,6 +742,40 @@ int PhoneAvAudioCodec::Read(int16_t* dest, int samples) {
         hw_->Read(mic_frames_.data(), frames, input_gain_);
     }
 
+    const TickType_t now = xTaskGetTickCount();
+    const TickType_t last_out = last_output_tick_.load();
+    const bool playback_recent =
+        last_out != 0 && (now - last_out) <= pdMS_TO_TICKS(kPlaybackGuardMs);
+    if (playback_recent) {
+        // The phone/amp is still playing (plus a short tail). By default the
+        // mic is muted so the server cannot hear the assistant's own TTS and
+        // answer itself. Barge-in can be enabled on the 8080 page.
+        if (mute_mic_during_playback_.load()) {
+            std::memset(mic_frames_.data(), 0,
+                        static_cast<std::size_t>(frames) * sizeof(int16_t));
+        }
+        // Never let TTS echo arm the auto-listen gate.
+    } else {
+        int64_t energy = 0;
+        int peak = 0;
+        for (int f = 0; f < frames; ++f) {
+            const int32_t value = mic_frames_[f];
+            energy += static_cast<int64_t>(value) * value;
+            const int32_t absolute = value < 0 ? -value : value;
+            if (absolute > peak) {
+                peak = absolute;
+            }
+        }
+        const int rms =
+            frames > 0
+                ? static_cast<int>(std::sqrt(static_cast<double>(energy) / frames))
+                : 0;
+        if (rms >= PHONE_AV_VOICE_RMS_THRESHOLD ||
+            peak >= PHONE_AV_VOICE_PEAK_THRESHOLD) {
+            last_voice_tick_.store(now);
+        }
+    }
+
     if (static_cast<int>(ref_frames_.size()) < frames) {
         ref_frames_.resize(static_cast<std::size_t>(frames));
     }
@@ -760,6 +794,7 @@ int PhoneAvAudioCodec::Write(const int16_t* data, int samples) {
     if (data == nullptr || samples <= 0) {
         return 0;
     }
+    last_output_tick_.store(xTaskGetTickCount());
     ref_buffer_.Push(data, static_cast<std::size_t>(samples));
     if (active_spk_ == PhoneAvSource::kPhone && phone_spk_) {
         phone_spk_->Push(data, static_cast<std::size_t>(samples));
@@ -774,6 +809,22 @@ bool PhoneAvAudioCodec::IsMicAvailable() const {
         return hw_mic_ready_;
     }
     return phone_mic_ && phone_mic_->Connected();
+}
+
+bool PhoneAvAudioCodec::IsPlaybackActive() const {
+    const TickType_t last = last_output_tick_.load();
+    if (last == 0) {
+        return false;
+    }
+    return (xTaskGetTickCount() - last) <= pdMS_TO_TICKS(kPlaybackGuardMs);
+}
+
+bool PhoneAvAudioCodec::VoiceDetectedRecently() const {
+    const TickType_t last = last_voice_tick_.load();
+    if (last == 0) {
+        return false;
+    }
+    return (xTaskGetTickCount() - last) <= pdMS_TO_TICKS(kVoiceHoldMs);
 }
 
 bool PhoneAvAudioCodec::IsPhoneMicConnected() const {

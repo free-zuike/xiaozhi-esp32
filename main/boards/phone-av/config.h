@@ -144,4 +144,15 @@
 #define PHONE_AV_HW_DISP_PCLK_HZ (40 * 1000 * 1000)
 #endif
 
+/* Auto-listen voice gate. When "自动对话" is enabled on the 8080 page, the
+ * board only starts a new turn after the microphone sees sustained speech-like
+ * energy for one 60 ms frame. These thresholds are on the raw 16-bit PCM that
+ * reaches the audio codec; raise them if ambient noise keeps starting turns. */
+#ifndef PHONE_AV_VOICE_RMS_THRESHOLD
+#define PHONE_AV_VOICE_RMS_THRESHOLD 500
+#endif
+#ifndef PHONE_AV_VOICE_PEAK_THRESHOLD
+#define PHONE_AV_VOICE_PEAK_THRESHOLD 4000
+#endif
+
 #endif

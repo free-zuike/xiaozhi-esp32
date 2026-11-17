@@ -163,6 +163,17 @@ public:
     uint32_t SpeakerPostFail() const;
     uint32_t SpeakerSamples() const;
 
+    /* Auto-listen gating: true when speech-like energy arrived recently. */
+    bool VoiceDetectedRecently() const;
+    /* True while the last playback is still recent (echo guard window). */
+    bool IsPlaybackActive() const;
+    /* When true the microphone is muted while playback is active (and for a
+     * short tail), which prevents the assistant from hearing its own TTS.
+     * Turning this off restores barge-in but can cause self-QA on a loud
+     * speaker. */
+    void SetMuteMicDuringPlayback(bool mute) { mute_mic_during_playback_ = mute; }
+    bool MuteMicDuringPlayback() const { return mute_mic_during_playback_.load(); }
+
     PhoneAvSource SelectedMicSource() const { return selected_mic_; }
     PhoneAvSource SelectedSpkSource() const { return selected_spk_; }
     PhoneAvSource ActiveMicSource() const { return active_mic_; }
@@ -177,6 +188,13 @@ protected:
 private:
     static constexpr std::size_t kRefBufferSamples = 16000;  // 1 s @ 16 kHz
     static constexpr std::size_t kMicFrameBufferSamples = 2048;
+    // Playback is "recent" for this long after the last Write(); it covers the
+    // 600 ms phone POST batch, HTTP/phone latency and the TTS tail. The mic is
+    // muted during this window by default, and the auto-listen voice detector
+    // ignores it.
+    static constexpr uint32_t kPlaybackGuardMs = 1500;
+    // A voice burst keeps the auto-listen gate open for this long.
+    static constexpr uint32_t kVoiceHoldMs = 700;
 
     void PacePhoneRead(int frames);
     static PhoneAvSource ReadSource(const char* key);
@@ -198,6 +216,9 @@ private:
     std::vector<int16_t> mic_frames_;
     TickType_t last_read_tick_ = 0;
     std::atomic<bool> started_{false};
+    std::atomic<bool> mute_mic_during_playback_{true};
+    std::atomic<TickType_t> last_output_tick_{0};
+    std::atomic<TickType_t> last_voice_tick_{0};
 };
 
 #endif  // _PHONE_AV_AUDIO_H_

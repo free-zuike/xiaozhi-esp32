@@ -58,6 +58,8 @@ constexpr const char* kPhoneAvConfigKey = "host";
 constexpr const char* kPhoneAvSrcSpkKey = "src_spk";
 constexpr const char* kPhoneAvSrcMicKey = "src_mic";
 constexpr const char* kPhoneAvSrcDispKey = "src_disp";
+constexpr const char* kPhoneAvAutoListenKey = "auto_listen";
+constexpr const char* kPhoneAvBargeInKey = "barge_in";
 
 /* The phone address is runtime configuration, not a build-time constant.
  * It is kept in NVS so it survives reboots and firmware updates. */
@@ -141,6 +143,11 @@ PhoneAvSource PhoneAvParseSource(const std::string& value, PhoneAvSource fallbac
 PhoneAvSource PhoneAvGetSource(const char* key) {
     Settings settings(kPhoneAvConfigNs, false);
     return PhoneAvParseSource(settings.GetString(key, "phone"), PhoneAvSource::kPhone);
+}
+
+bool PhoneAvGetBool(const char* key, bool fallback) {
+    Settings settings(kPhoneAvConfigNs, false);
+    return settings.GetBool(key, fallback);
 }
 
 std::string PhoneAvUrlDecode(const std::string& in) {
@@ -229,6 +236,9 @@ std::string PhoneAvConfigPage(const std::string& message) {
         disp = PhoneAvSource::kPhone;
     }
 
+    const bool auto_listen = PhoneAvGetBool(kPhoneAvAutoListenKey, false);
+    const bool barge_in = PhoneAvGetBool(kPhoneAvBargeInKey, false);
+
     auto radio = [](const char* name, const char* value, const char* label, bool checked,
                     bool disabled) {
         std::string out = "<label><input type=\"radio\" name=\"";
@@ -261,6 +271,28 @@ std::string PhoneAvConfigPage(const std::string& message) {
         radio("src_disp", "hw", "本地 LCD", disp == PhoneAvSource::kHardware, !disp_hw_ok) +
         (disp_hw_ok ? "" : "<span class=\"warn\">未配置（config.h）</span>");
 
+    std::string auto_controls = "<select name=\"auto_listen\">";
+    auto_controls += "<option value=\"0\"";
+    if (!auto_listen) {
+        auto_controls += " selected";
+    }
+    auto_controls += ">关闭</option><option value=\"1\"";
+    if (auto_listen) {
+        auto_controls += " selected";
+    }
+    auto_controls += ">开启（检测到说话后）</option></select>";
+
+    std::string barge_controls = "<select name=\"barge_in\">";
+    barge_controls += "<option value=\"0\"";
+    if (!barge_in) {
+        barge_controls += " selected";
+    }
+    barge_controls += ">关闭（防自问自答）</option><option value=\"1\"";
+    if (barge_in) {
+        barge_controls += " selected";
+    }
+    barge_controls += ">开启（可打断，可能自问自答）</option></select>";
+
     std::string html =
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -269,7 +301,9 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "input{font-size:16px;padding:8px;width:100%;box-sizing:border-box}"
         "button{font-size:16px;padding:10px 20px;margin-top:12px}"
         "code{background:#eee;padding:2px 6px}"
+        "select{font-size:16px;padding:6px;margin-left:6px}"
         ".src div{margin:6px 0}.src label{margin-right:14px;white-space:nowrap}"
+        ".hint{color:#666;font-size:13px}"
         ".warn{color:#b00;font-size:13px}</style></head><body>"
         "<h2>手机 AV 地址设置</h2>"
         "<p>当前手机地址：<code>" + host + "</code></p>"
@@ -284,7 +318,10 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "<div>喇叭：" + spk_controls + "</div>"
         "<div>录音：" + mic_controls + "</div>"
         "<div>屏幕：" + disp_controls + "</div>"
+        "<div>自动对话：" + auto_controls + "</div>"
+        "<div>播放时开麦：" + barge_controls + "</div>"
         "</div>"
+        "<p class=\"hint\">默认关闭自动对话和播放时开麦：不会在没人时自己开聊，也不会听到自己的 TTS 后自问自答。开启“播放时开麦”才能打断，但可能出现自问自答。</p>"
         "<button type=\"submit\">保存并重启</button></form>";
     if (!message.empty()) {
         html += "<p><b>" + message + "</b></p>";
@@ -359,6 +396,8 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "    const j=await r.json();"
         "    let t='来源: 喇叭='+srcName(j.active_spk)+' 录音='+srcName(j.active_mic)+"
         "          ' 屏幕='+srcName(j.active_disp)+'\\n';"
+        "    t+='自动对话: '+(j.auto_listen?'开':'关')+'  播放开麦: '+"
+        "      (j.barge_in?'开':'关')+'  语音: '+(j.voice_recent?'刚检测到':'无')+'\\n';"
         "    t+='状态: '+(j.screen_status||'')+'\\n';"
         "    t+='表情: '+(j.screen_emotion||'')+'  主题: '+(j.screen_theme||'')+'\\n';"
         "    t+='资源分区: '+(j.assets_valid?'有效':'未就绪')+'\\n';"
@@ -421,6 +460,22 @@ esp_err_t PhoneAvConfigSetHandler(httpd_req_t* req) {
     PhoneAvSource disp = PhoneAvParseSource(
         PhoneAvFormValue(form, kPhoneAvSrcDispKey), PhoneAvGetSource(kPhoneAvSrcDispKey));
 
+    auto parse_bool = [](const std::string& value, bool fallback) {
+        if (value == "1" || value == "true" || value == "on") {
+            return true;
+        }
+        if (value == "0" || value == "false" || value == "off") {
+            return false;
+        }
+        return fallback;
+    };
+    const bool auto_listen = parse_bool(
+        PhoneAvFormValue(form, kPhoneAvAutoListenKey),
+        PhoneAvGetBool(kPhoneAvAutoListenKey, false));
+    const bool barge_in = parse_bool(
+        PhoneAvFormValue(form, kPhoneAvBargeInKey),
+        PhoneAvGetBool(kPhoneAvBargeInKey, false));
+
     if (spk == PhoneAvSource::kHardware && !PhoneAvHwSpkConfigured()) {
         const std::string page = PhoneAvConfigPage(
             "本地喇叭未配置：请先在 config.h 填 PHONE_AV_HW_SPK_BCLK/LRCK/DIN 并重新编译");
@@ -449,10 +504,14 @@ esp_err_t PhoneAvConfigSetHandler(httpd_req_t* req) {
         settings.SetString(kPhoneAvSrcSpkKey, PhoneAvSourceToken(spk));
         settings.SetString(kPhoneAvSrcMicKey, PhoneAvSourceToken(mic));
         settings.SetString(kPhoneAvSrcDispKey, PhoneAvSourceToken(disp));
+        settings.SetBool(kPhoneAvAutoListenKey, auto_listen);
+        settings.SetBool(kPhoneAvBargeInKey, barge_in);
     }
-    ESP_LOGI(TAG, "Phone AV config updated: host=%s spk=%s mic=%s disp=%s, restarting",
+    ESP_LOGI(TAG,
+             "Phone AV config updated: host=%s spk=%s mic=%s disp=%s auto_listen=%d "
+             "barge_in=%d, restarting",
              host.c_str(), PhoneAvSourceToken(spk), PhoneAvSourceToken(mic),
-             PhoneAvSourceToken(disp));
+             PhoneAvSourceToken(disp), auto_listen, barge_in);
     const std::string page = PhoneAvConfigPage("已保存，板子即将自动重启…");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
@@ -756,17 +815,16 @@ public:
             .callback =
                 [](void* arg) {
                     auto* board = static_cast<PhoneAvBoard*>(arg);
-                    if (!board->IsNetworkReady()) {
+                    if (!board->IsNetworkReady() || !board->auto_listen_.load()) {
                         return;
                     }
                     // Only start a conversation when a microphone is actually
-                    // available: the phone mic stream is open, or a local I2S/PDM
-                    // mic initialized successfully. Otherwise entering listening
-                    // would immediately fail and the device would blink forever
-                    // in an idle<->listening loop.
+                    // available AND the user just spoke. Starting a session in
+                    // silence made the assistant talk to itself at night.
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
                         auto* codec = static_cast<PhoneAvAudioCodec*>(board->GetAudioCodec());
-                        if (codec != nullptr && codec->IsMicAvailable()) {
+                        if (codec != nullptr && codec->IsMicAvailable() &&
+                            !codec->IsPlaybackActive() && codec->VoiceDetectedRecently()) {
                             // Let HandleToggleChatEvent() open the audio channel through
                             // the standard Connecting state. Do NOT call
                             // SetListeningMode() here: it would jump straight to
@@ -787,7 +845,14 @@ public:
         // Construct the codec here (on the main task) instead of letting the
         // first status/auto-listen callback do it on the small esp_timer or
         // httpd stack. Hardware I2S initialization happens in the constructor.
-        AudioCodecPtr();
+        auto* codec = AudioCodecPtr();
+        auto_listen_ = PhoneAvGetBool(kPhoneAvAutoListenKey, false);
+        const bool barge_in = PhoneAvGetBool(kPhoneAvBargeInKey, false);
+        if (codec != nullptr) {
+            // Safe default: mute the mic while TTS is playing so the server
+            // cannot hear the assistant and answer itself. Barge-in is opt-in.
+            codec->SetMuteMicDuringPlayback(!barge_in);
+        }
     }
 
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) override {
@@ -862,6 +927,15 @@ public:
         return codec != nullptr && codec->HwSpkActive();
     }
     bool HwDisplayActive() const { return hw_display_ != nullptr; }
+    bool AutoListenEnabled() const { return auto_listen_.load(); }
+    bool BargeInEnabled() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr && !codec->MuteMicDuringPlayback();
+    }
+    bool VoiceRecentlyDetected() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr && codec->VoiceDetectedRecently();
+    }
 
     virtual AudioCodec* GetAudioCodec() override {
         static PhoneAvAudioCodec codec;
@@ -987,6 +1061,7 @@ private:
     }
 
     std::atomic<bool> network_ready_{false};
+    std::atomic<bool> auto_listen_{false};
     NetworkEventCallback user_network_event_callback_;
     esp_timer_handle_t auto_listen_timer_{nullptr};
     Button boot_button_;
@@ -1036,6 +1111,9 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
     const bool hw_disp_configured = PhoneAvHwDispConfigured();
     const bool hw_spk_active = board->HwSpkActive();
     const bool hw_mic_active = board->HwMicActive();
+    const bool auto_listen = board->AutoListenEnabled();
+    const bool barge_in = board->BargeInEnabled();
+    const bool voice_recent = board->VoiceRecentlyDetected();
 
     const char* rr = "unknown";
     switch (esp_reset_reason()) {
@@ -1110,6 +1188,9 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         "  \"hw_spk_active\": " + (hw_spk_active ? "true" : "false") + ",\n" +
         "  \"hw_mic_active\": " + (hw_mic_active ? "true" : "false") + ",\n" +
         "  \"hw_disp_active\": " + (active_disp_hw ? "true" : "false") + ",\n" +
+        "  \"auto_listen\": " + (auto_listen ? "true" : "false") + ",\n" +
+        "  \"barge_in\": " + (barge_in ? "true" : "false") + ",\n" +
+        "  \"voice_recent\": " + (voice_recent ? "true" : "false") + ",\n" +
         "  \"voice_detected\": " + (voice ? "true" : "false") + ",\n" +
         "  \"phone_mic_connected\": " + (mic ? "true" : "false") + ",\n" +
         "  \"network_ready\": " + (net ? "true" : "false") + ",\n" +
