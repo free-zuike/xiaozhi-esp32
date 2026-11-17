@@ -8,6 +8,10 @@
 #include "system_info.h"
 #include "application.h"
 #include "assets.h"
+#include "phone_av_audio.h"
+#include "phone_av_display.h"
+#include "backlight.h"
+#include "display/lcd_display.h"
 #include <esp_timer.h>
 
 #include "led/led.h"
@@ -28,7 +32,11 @@
 #include <utility>
 #include <vector>
 
+#include <driver/spi_common.h>
 #include <esp_http_server.h>
+#include <esp_lcd_panel_io.h>
+#include <esp_lcd_panel_ops.h>
+#include <esp_lcd_panel_vendor.h>
 #include <esp_wifi.h>
 #include <esp_log.h>
 #include <esp_netif.h>
@@ -36,49 +44,39 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#if PHONE_AV_HW_DISP_TYPE == 2
+#include "esp_lcd_ili9341.h"
+#elif PHONE_AV_HW_DISP_TYPE == 3
+#include "esp_lcd_gc9a01.h"
+#endif
+
 #define TAG "PhoneAvBoard"
 
-namespace {
+constexpr uint16_t kPhoneAvConfigPort = 8080;
+constexpr const char* kPhoneAvConfigNs = "phone_av";
+constexpr const char* kPhoneAvConfigKey = "host";
+constexpr const char* kPhoneAvSrcSpkKey = "src_spk";
+constexpr const char* kPhoneAvSrcMicKey = "src_mic";
+constexpr const char* kPhoneAvSrcDispKey = "src_disp";
 
-bool PhoneAvNetworkReady();
+/* The phone address is runtime configuration, not a build-time constant.
+ * It is kept in NVS so it survives reboots and firmware updates. */
+std::string PhoneAvHost() {
+    Settings settings(kPhoneAvConfigNs, false);
+    return settings.GetString(kPhoneAvConfigKey, PHONE_AV_HOST);
+}
+
+std::string PhoneAvUrl(const char* path) {
+    return std::string("http://") + PhoneAvHost() + ":" + std::to_string(PHONE_AV_PORT) + path;
+}
+
+namespace {
 
 // Diagnostics endpoint handler; defined below (after PhoneAvBoard is complete).
 esp_err_t PhoneAvStatusHandler(httpd_req_t* req);
 // Serves files straight out of the real assets partition: the same index.json
 // and emoji images that a physical LVGL display would consume.
 esp_err_t PhoneAvAssetsHandler(httpd_req_t* req);
-
-/* This board has no physical display, so xiaozhi's "screen" content (status,
- * notifications and chat messages -- including the 6-digit activation code in
- * activation.message) is mirrored here and served to the phone over the LAN
- * config page. Display callbacks run from the application task while the HTTP
- * handler runs from the httpd task, so all state is mutex protected. */
-constexpr std::size_t kPhoneAvMaxLogLines = 64;
-constexpr std::size_t kPhoneAvMaxChatLines = 60;
-
-struct PhoneAvScreenState {
-    std::mutex mutex;
-    std::string status;
-    std::string emotion;
-    std::string chat_message;
-    std::string notification;
-    // Mirrored from the standard Display interface so the virtual screen can
-    // prove that Assets::Apply() really ran. A real LCD would render these;
-    // here they are only reported over HTTP.
-    std::string theme;
-    bool custom_emoji_collection = false;
-    // Role of the last subtitle fragment; empty once a turn has ended. Upstream
-    // pushes TTS/STT subtitles as consecutive fragments of one sentence, so
-    // they must be joined instead of each becoming its own history line.
-    std::string last_chat_role;
-    std::vector<std::string> messages;  // complete [user]/[assistant] lines
-    std::vector<std::string> history;   // device status / notification log
-};
-
-PhoneAvScreenState& PhoneAvScreen() {
-    static PhoneAvScreenState state;
-    return state;
-}
 
 std::string PhoneAvJsonEscape(const std::string& in) {
     std::string out;
@@ -103,131 +101,98 @@ std::string PhoneAvJsonEscape(const std::string& in) {
     return out;
 }
 
-void PhoneAvScreenAppendLocked(PhoneAvScreenState& state, const char* kind, const char* text) {
-    if (text == nullptr || *text == '\0') {
-        // Upstream clears bubbles with empty messages. Those blank lines used
-        // to consume the history budget and push real subtitles out of view.
-        return;
-    }
-    std::string line = "[";
-    line += kind;
-    line += "] ";
-    line += text;
-    state.history.push_back(line);
-    if (state.history.size() > kPhoneAvMaxLogLines) {
-        state.history.erase(state.history.begin());
-    }
+constexpr bool PhoneAvHwSpkConfigured() {
+    return PHONE_AV_HW_SPK_BCLK != GPIO_NUM_NC && PHONE_AV_HW_SPK_LRCK != GPIO_NUM_NC &&
+           PHONE_AV_HW_SPK_DIN != GPIO_NUM_NC;
 }
 
-class PhoneAvDisplay : public Display {
-public:
-    using Display::ShowNotification;
+constexpr bool PhoneAvHwMicConfigured() {
+#if PHONE_AV_HW_MIC_PDM
+    return PHONE_AV_HW_MIC_SCK != GPIO_NUM_NC && PHONE_AV_HW_MIC_DIN != GPIO_NUM_NC;
+#else
+    return PHONE_AV_HW_MIC_SCK != GPIO_NUM_NC && PHONE_AV_HW_MIC_WS != GPIO_NUM_NC &&
+           PHONE_AV_HW_MIC_DIN != GPIO_NUM_NC;
+#endif
+}
 
-    void SetStatus(const char* status) override {
-        Display::SetStatus(status);
-        auto& state = PhoneAvScreen();
-        std::lock_guard<std::mutex> lock(state.mutex);
-        state.status = status != nullptr ? status : "";
-        // A state change (idle / listening / speaking ...) marks a new turn, so
-        // later fragments are not merged into the previous line.
-        state.last_chat_role.clear();
-        PhoneAvScreenAppendLocked(state, "status", status);
+constexpr bool PhoneAvHwDispConfigured() {
+#if PHONE_AV_HW_DISP_TYPE == 0
+    return false;
+#else
+    return PHONE_AV_HW_DISP_MOSI != GPIO_NUM_NC && PHONE_AV_HW_DISP_CLK != GPIO_NUM_NC &&
+           PHONE_AV_HW_DISP_CS != GPIO_NUM_NC && PHONE_AV_HW_DISP_DC != GPIO_NUM_NC;
+#endif
+}
+
+const char* PhoneAvSourceToken(PhoneAvSource source) {
+    return source == PhoneAvSource::kHardware ? "hw" : "phone";
+}
+
+PhoneAvSource PhoneAvParseSource(const std::string& value, PhoneAvSource fallback) {
+    if (value == "hw") {
+        return PhoneAvSource::kHardware;
     }
-
-    void SetEmotion(const char* emotion) override {
-        Display::SetEmotion(emotion);
-        auto& state = PhoneAvScreen();
-        std::lock_guard<std::mutex> lock(state.mutex);
-        state.emotion = emotion != nullptr ? emotion : "";
+    if (value == "phone") {
+        return PhoneAvSource::kPhone;
     }
+    return fallback;
+}
 
-    void SetChatMessage(const char* role, const char* content) override {
-        Display::SetChatMessage(role, content);
-        auto& state = PhoneAvScreen();
-        std::lock_guard<std::mutex> lock(state.mutex);
-        const std::string text = content != nullptr ? content : "";
-        const std::string r = role != nullptr ? role : "chat";
-        state.chat_message = text;
-        if (text.empty()) {
-            // Upstream clears the bubble with an empty message at the end of a
-            // turn. Keep the recorded conversation intact but end the merge.
-            state.last_chat_role.clear();
-            return;
-        }
-        if (r == "user" || r == "assistant") {
-            if (state.last_chat_role == r && !state.messages.empty()) {
-                // TTS/STT subtitles arrive as consecutive fragments of one
-                // sentence; append instead of creating another line.
-                state.messages.back() += text;
-            } else {
-                state.messages.push_back("[" + r + "] " + text);
-                if (state.messages.size() > kPhoneAvMaxChatLines) {
-                    state.messages.erase(state.messages.begin());
-                }
-            }
-            state.last_chat_role = r;
-        } else {
-            PhoneAvScreenAppendLocked(state, r.c_str(), text.c_str());
-        }
-    }
-
-    void ShowNotification(const char* notification, int duration_ms) override {
-        Display::ShowNotification(notification, duration_ms);
-        auto& state = PhoneAvScreen();
-        std::lock_guard<std::mutex> lock(state.mutex);
-        state.notification = notification != nullptr ? notification : "";
-        PhoneAvScreenAppendLocked(state, "notice", notification);
-    }
-
-    void ClearChatMessages() override {
-        Display::ClearChatMessages();
-        auto& state = PhoneAvScreen();
-        std::lock_guard<std::mutex> lock(state.mutex);
-        state.chat_message.clear();
-        state.last_chat_role.clear();
-        // Keep the recorded conversation and history so the activation code
-        // and subtitles remain readable when the device goes back to idle.
-    }
-
-    // Assets::Apply() pushes the parsed theme and custom emoji collection
-    // through these standard Display hooks. A physical LVGL screen would draw
-    // them; the virtual screen only records that they arrived, and the web page
-    // renders the very same image files straight from the assets partition.
-    // Keeping these hooks means swapping in a real LCD later needs no changes
-    // in application.cc / assets.cc / the MCP tools.
-    void SetTheme(Theme* theme) override {
-        Display::SetTheme(theme);
-        auto& state = PhoneAvScreen();
-        std::lock_guard<std::mutex> lock(state.mutex);
-        state.theme = theme != nullptr ? theme->name() : "";
-    }
-
-    void SetEmojiCollection(std::shared_ptr<EmojiCollection> collection) override {
-        const bool present = collection != nullptr;
-        Display::SetEmojiCollection(std::move(collection));
-        auto& state = PhoneAvScreen();
-        std::lock_guard<std::mutex> lock(state.mutex);
-        state.custom_emoji_collection = present;
-    }
-
-private:
-    bool Lock(int timeout_ms = 0) override { return true; }
-    void Unlock() override {}
-};
-
-constexpr uint16_t kPhoneAvConfigPort = 8080;
-constexpr const char* kPhoneAvConfigNs = "phone_av";
-constexpr const char* kPhoneAvConfigKey = "host";
-
-/* The phone address is runtime configuration, not a build-time constant.
- * It is kept in NVS so it survives reboots and firmware updates. */
-std::string PhoneAvHost() {
+PhoneAvSource PhoneAvGetSource(const char* key) {
     Settings settings(kPhoneAvConfigNs, false);
-    return settings.GetString(kPhoneAvConfigKey, PHONE_AV_HOST);
+    return PhoneAvParseSource(settings.GetString(key, "phone"), PhoneAvSource::kPhone);
 }
 
-std::string PhoneAvUrl(const char* path) {
-    return std::string("http://") + PhoneAvHost() + ":" + std::to_string(PHONE_AV_PORT) + path;
+std::string PhoneAvUrlDecode(const std::string& in) {
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') {
+            return c - '0';
+        }
+        if (c >= 'a' && c <= 'f') {
+            return c - 'a' + 10;
+        }
+        if (c >= 'A' && c <= 'F') {
+            return c - 'A' + 10;
+        }
+        return -1;
+    };
+    std::string out;
+    out.reserve(in.size());
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        char c = in[i];
+        if (c == '+') {
+            out += ' ';
+        } else if (c == '%' && i + 2 < in.size()) {
+            int hi = hex(in[i + 1]);
+            int lo = hex(in[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out += static_cast<char>((hi << 4) | lo);
+                i += 2;
+            } else {
+                out += c;
+            }
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+std::string PhoneAvFormValue(const std::string& body, const char* key) {
+    const std::string prefix = std::string(key) + "=";
+    std::size_t pos = 0;
+    while ((pos = body.find(prefix, pos)) != std::string::npos) {
+        if (pos == 0 || body[pos - 1] == '&') {
+            std::size_t start = pos + prefix.size();
+            std::size_t end = body.find('&', start);
+            if (end == std::string::npos) {
+                end = body.size();
+            }
+            return PhoneAvUrlDecode(body.substr(start, end - start));
+        }
+        pos += prefix.size();
+    }
+    return "";
 }
 
 bool IsValidPhoneAvHost(const std::string& host) {
@@ -245,14 +210,67 @@ bool IsValidPhoneAvHost(const std::string& host) {
 
 std::string PhoneAvConfigPage(const std::string& message) {
     const std::string host = PhoneAvHost();
+    const bool spk_hw_ok = PhoneAvHwSpkConfigured();
+    const bool mic_hw_ok = PhoneAvHwMicConfigured();
+    const bool disp_hw_ok = PhoneAvHwDispConfigured();
+
+    // If NVS still says "hw" but the pins are no longer configured, show the
+    // effective phone selection so saving the page repairs the setting.
+    PhoneAvSource spk = PhoneAvGetSource(kPhoneAvSrcSpkKey);
+    PhoneAvSource mic = PhoneAvGetSource(kPhoneAvSrcMicKey);
+    PhoneAvSource disp = PhoneAvGetSource(kPhoneAvSrcDispKey);
+    if (spk == PhoneAvSource::kHardware && !spk_hw_ok) {
+        spk = PhoneAvSource::kPhone;
+    }
+    if (mic == PhoneAvSource::kHardware && !mic_hw_ok) {
+        mic = PhoneAvSource::kPhone;
+    }
+    if (disp == PhoneAvSource::kHardware && !disp_hw_ok) {
+        disp = PhoneAvSource::kPhone;
+    }
+
+    auto radio = [](const char* name, const char* value, const char* label, bool checked,
+                    bool disabled) {
+        std::string out = "<label><input type=\"radio\" name=\"";
+        out += name;
+        out += "\" value=\"";
+        out += value;
+        out += "\"";
+        if (checked) {
+            out += " checked";
+        }
+        if (disabled) {
+            out += " disabled";
+        }
+        out += "> ";
+        out += label;
+        out += "</label>";
+        return out;
+    };
+
+    const std::string spk_controls =
+        radio("src_spk", "phone", "手机", spk == PhoneAvSource::kPhone, false) +
+        radio("src_spk", "hw", "本地功放", spk == PhoneAvSource::kHardware, !spk_hw_ok) +
+        (spk_hw_ok ? "" : "<span class=\"warn\">未配置（config.h）</span>");
+    const std::string mic_controls =
+        radio("src_mic", "phone", "手机", mic == PhoneAvSource::kPhone, false) +
+        radio("src_mic", "hw", "本地麦克风", mic == PhoneAvSource::kHardware, !mic_hw_ok) +
+        (mic_hw_ok ? "" : "<span class=\"warn\">未配置（config.h）</span>");
+    const std::string disp_controls =
+        radio("src_disp", "phone", "8080 虚拟屏", disp == PhoneAvSource::kPhone, false) +
+        radio("src_disp", "hw", "本地 LCD", disp == PhoneAvSource::kHardware, !disp_hw_ok) +
+        (disp_hw_ok ? "" : "<span class=\"warn\">未配置（config.h）</span>");
+
     std::string html =
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
         "<title>phone-av 设置</title><style>"
-        "body{font-family:sans-serif;max-width:460px;margin:40px auto;padding:0 16px;line-height:1.6}"
+        "body{font-family:sans-serif;max-width:480px;margin:40px auto;padding:0 16px;line-height:1.6}"
         "input{font-size:16px;padding:8px;width:100%;box-sizing:border-box}"
         "button{font-size:16px;padding:10px 20px;margin-top:12px}"
-        "code{background:#eee;padding:2px 6px}</style></head><body>"
+        "code{background:#eee;padding:2px 6px}"
+        ".src div{margin:6px 0}.src label{margin-right:14px;white-space:nowrap}"
+        ".warn{color:#b00;font-size:13px}</style></head><body>"
         "<h2>手机 AV 地址设置</h2>"
         "<p>当前手机地址：<code>" + host + "</code></p>"
         "<p>端口：<code>" + std::to_string(PHONE_AV_PORT) +
@@ -260,16 +278,24 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "<form method=\"post\" action=\"/set\">"
         "<label>手机 IP 或域名<br><input name=\"host\" value=\"" + host +
         "\" required></label>"
+        "<h2>能力来源</h2>"
+        "<p>保存后板子会自动重启，新的来源才会生效。</p>"
+        "<div class=\"src\">"
+        "<div>喇叭：" + spk_controls + "</div>"
+        "<div>录音：" + mic_controls + "</div>"
+        "<div>屏幕：" + disp_controls + "</div>"
+        "</div>"
         "<button type=\"submit\">保存并重启</button></form>";
     if (!message.empty()) {
         html += "<p><b>" + message + "</b></p>";
     }
     html +=
-        "<p>保存后板子会自动重启一次让新地址生效；WiFi 配置不会丢失。"
+        "<p>保存后板子会自动重启一次让新地址/来源生效；WiFi 配置不会丢失。"
         "以后手机 IP 变了只需再来这里改，不用重刷固件。</p>"
         "<p><a href=\"/api/host\">查看当前地址（纯文本）</a></p>"
         "<h2>设备屏幕（虚拟）</h2>"
-        "<p>本板无物理屏幕，xiaozhi 的屏幕内容（含 6 位设备验证码）显示在这里，每秒刷新。</p>"
+        "<p>未接本地屏幕时，xiaozhi 的屏幕内容（含 6 位设备验证码）显示在这里，每秒刷新。"
+        "即使已切到本地 LCD，这里仍会继续镜像一份，方便远程查看。</p>"
         "<p>主题色、表情图片与背景资源都取自真实的 assets 分区（与实体 LCD 同一份 index.json）。未刷 assets 时先显示内置 emoji 占位，刷入真实资源后自动切换为硬件表情图。</p>"
         "<div id=\"face\" style=\"text-align:center;min-height:96px;font-size:72px;line-height:96px\">"
         "<span id=\"faceEmoji\" style=\"display:none\"></span>"
@@ -280,6 +306,7 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "读取中...</div>"
         "<script>"
         "let assetIndex=null;"
+        "const srcName=s=>s==='hw'?'本地硬件':'手机';"
         "fetch('/assets/index.json',{cache:'no-store'})"
         "  .then(r=>r.ok?r.json():null).then(j=>{assetIndex=j;applySkin();})"
         "  .catch(()=>{});"
@@ -330,7 +357,9 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "  try{"
         "    const r=await fetch('/status',{cache:'no-store'});"
         "    const j=await r.json();"
-        "    let t='状态: '+(j.screen_status||'')+'\\n';"
+        "    let t='来源: 喇叭='+srcName(j.active_spk)+' 录音='+srcName(j.active_mic)+"
+        "          ' 屏幕='+srcName(j.active_disp)+'\\n';"
+        "    t+='状态: '+(j.screen_status||'')+'\\n';"
         "    t+='表情: '+(j.screen_emotion||'')+'  主题: '+(j.screen_theme||'')+'\\n';"
         "    t+='资源分区: '+(j.assets_valid?'有效':'未就绪')+'\\n';"
         "    if(j.screen_notification)t+='通知: '+j.screen_notification+'\\n';"
@@ -367,7 +396,7 @@ void PhoneAvRestartTask(void*) {
 }
 
 esp_err_t PhoneAvConfigSetHandler(httpd_req_t* req) {
-    char body[256] = {0};
+    char body[512] = {0};
     int received = httpd_req_recv(req, body, static_cast<size_t>(sizeof(body) - 1));
     if (received < 0) {
         const std::string page = PhoneAvConfigPage("读取请求失败，请重试");
@@ -377,28 +406,54 @@ esp_err_t PhoneAvConfigSetHandler(httpd_req_t* req) {
     }
     body[received] = '\0';
     const std::string form(body, static_cast<std::size_t>(received));
-    const std::string key = "host=";
-    std::string host;
-    auto pos = form.find(key);
-    if (pos != std::string::npos) {
-        host = form.substr(pos + key.size());
-        auto amp = host.find('&');
-        if (amp != std::string::npos) {
-            host.resize(amp);
-        }
-    }
+    const std::string host = PhoneAvFormValue(form, "host");
     if (!IsValidPhoneAvHost(host)) {
         const std::string page = PhoneAvConfigPage("地址无效，请填写 IP（如 192.168.0.108）或域名");
         httpd_resp_set_type(req, "text/html; charset=utf-8");
         httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
         return ESP_OK;
     }
+
+    PhoneAvSource spk = PhoneAvParseSource(
+        PhoneAvFormValue(form, kPhoneAvSrcSpkKey), PhoneAvGetSource(kPhoneAvSrcSpkKey));
+    PhoneAvSource mic = PhoneAvParseSource(
+        PhoneAvFormValue(form, kPhoneAvSrcMicKey), PhoneAvGetSource(kPhoneAvSrcMicKey));
+    PhoneAvSource disp = PhoneAvParseSource(
+        PhoneAvFormValue(form, kPhoneAvSrcDispKey), PhoneAvGetSource(kPhoneAvSrcDispKey));
+
+    if (spk == PhoneAvSource::kHardware && !PhoneAvHwSpkConfigured()) {
+        const std::string page = PhoneAvConfigPage(
+            "本地喇叭未配置：请先在 config.h 填 PHONE_AV_HW_SPK_BCLK/LRCK/DIN 并重新编译");
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    if (mic == PhoneAvSource::kHardware && !PhoneAvHwMicConfigured()) {
+        const std::string page = PhoneAvConfigPage(
+            "本地麦克风未配置：请先在 config.h 填 PHONE_AV_HW_MIC_* 并重新编译");
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+    if (disp == PhoneAvSource::kHardware && !PhoneAvHwDispConfigured()) {
+        const std::string page = PhoneAvConfigPage(
+            "本地屏幕未配置：请先在 config.h 填 PHONE_AV_HW_DISP_* 并重新编译");
+        httpd_resp_set_type(req, "text/html; charset=utf-8");
+        httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
+        return ESP_OK;
+    }
+
     {
         Settings settings(kPhoneAvConfigNs, true);
         settings.SetString(kPhoneAvConfigKey, host);
+        settings.SetString(kPhoneAvSrcSpkKey, PhoneAvSourceToken(spk));
+        settings.SetString(kPhoneAvSrcMicKey, PhoneAvSourceToken(mic));
+        settings.SetString(kPhoneAvSrcDispKey, PhoneAvSourceToken(disp));
     }
-    ESP_LOGI(TAG, "Phone AV host updated to %s, restarting", host.c_str());
-    const std::string page = PhoneAvConfigPage("已保存为 " + host + "，板子即将自动重启…");
+    ESP_LOGI(TAG, "Phone AV config updated: host=%s spk=%s mic=%s disp=%s, restarting",
+             host.c_str(), PhoneAvSourceToken(spk), PhoneAvSourceToken(mic),
+             PhoneAvSourceToken(disp));
+    const std::string page = PhoneAvConfigPage("已保存，板子即将自动重启…");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
     xTaskCreate(PhoneAvRestartTask, "phone_av_restart", 2048, nullptr, 5, nullptr);
@@ -509,421 +564,6 @@ void StartPhoneAvConfigServer() {
     }
     ESP_LOGI(TAG, "Phone AV host: %s (change it on the config page)", PhoneAvHost().c_str());
 }
-
-class PcmRingBuffer {
-public:
-    explicit PcmRingBuffer(std::size_t capacity)
-        : buffer_(capacity), capacity_(capacity) {}
-
-    void Push(const int16_t* data, std::size_t samples) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (samples >= capacity_) {
-            data += samples - capacity_;
-            samples = capacity_;
-            read_pos_ = 0;
-            write_pos_ = 0;
-            count_ = 0;
-        }
-        for (std::size_t i = 0; i < samples; ++i) {
-            if (count_ == capacity_) {
-                read_pos_ = (read_pos_ + 1) % capacity_;
-                --count_;
-            }
-            buffer_[write_pos_] = data[i];
-            write_pos_ = (write_pos_ + 1) % capacity_;
-            ++count_;
-        }
-    }
-
-    std::size_t Pop(int16_t* dest, std::size_t samples) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        std::size_t count = std::min(samples, count_);
-        for (std::size_t i = 0; i < count; ++i) {
-            dest[i] = buffer_[read_pos_];
-            read_pos_ = (read_pos_ + 1) % capacity_;
-            --count_;
-        }
-        return count;
-    }
-
-    std::size_t Available() const {
-        std::lock_guard<std::mutex> lock(mutex_);
-        return count_;
-    }
-
-private:
-    std::vector<int16_t> buffer_;
-    std::size_t capacity_;
-    std::size_t read_pos_ = 0;
-    std::size_t write_pos_ = 0;
-    std::size_t count_ = 0;
-    mutable std::mutex mutex_;
-};
-
-class NetworkAudioCodec : public AudioCodec {
-public:
-    NetworkAudioCodec(int input_sample_rate, int output_sample_rate)
-        : mic_buffer_(kMicBufferSamples), speaker_buffer_(kSpeakerBufferSamples),
-          ref_buffer_(kRefBufferSamples) {
-        duplex_ = true;
-        // Feed the playback we sent to the phone back as the AFE's echo reference
-        // (ch1 alongside the mic on ch0). This is the configuration verified
-        // stable on this board; the phone app has its own AcousticEchoCanceler,
-        // so the two are complementary.
-        input_reference_ = true;
-        input_channels_ = input_reference_ ? 2 : 1;
-        output_channels_ = 1;
-        input_sample_rate_ = input_sample_rate;
-        output_sample_rate_ = output_sample_rate;
-    }
-
-    virtual void Start() override {
-        AudioCodec::Start();
-        if (started_.exchange(true)) {
-            return;
-        }
-        running_ = true;
-        // These tasks run the ESP HTTP client (connect + DNS + TCP) synchronously
-        // inside the codec. Give them generous headroom (the httpd task needs
-        // 16 KB for the same reasons); 24 KB keeps TLS/HTTP stacks comfortably
-        // inside the budget.
-        BaseType_t mic_result = xTaskCreate(MicTaskEntry, "phone_av_mic", 24576, this, 5, nullptr);
-        BaseType_t speaker_result = xTaskCreate(SpeakerTaskEntry, "phone_av_spk", 24576, this, 5, nullptr);
-        if (mic_result != pdPASS || speaker_result != pdPASS) {
-            ESP_LOGE(TAG, "Failed to create phone-av network audio tasks");
-        } else {
-            ESP_LOGI(TAG, "phone-av network audio tasks started");
-        }
-    }
-
-public:
-    virtual int Read(int16_t* dest, int samples) override {
-        if (dest == nullptr || samples <= 0) {
-            return 0;
-        }
-        const int channels = input_channels_;           // 1 (mic) or 2 (mic + AEC ref)
-        const int frames = samples / channels;
-        // Pace this read to the real audio rate. The upstream AudioService audio_input
-        // task calls Read() in a tight loop with no internal delay; for a real I2S mic the
-        // codec blocks until realtime samples arrive, which naturally paces the loop.
-        // Here the mic comes from the phone over HTTP and Pop() returns immediately, so
-        // without pacing the task spins at 100% CPU, floods the AFE feed ringbuffer
-        // ("AFE ringbuffer full"), triggers the task watchdog, and makes the AFE fall
-        // behind (encode queue overflow -> audio never reaches the server intact).
-        // Delaying to the realtime schedule keeps the pipeline at input_sample_rate and
-        // yields to other tasks.
-        const TickType_t now = xTaskGetTickCount();
-        if (last_read_tick_ != 0) {
-            const TickType_t expected =
-                last_read_tick_ + pdMS_TO_TICKS(frames * 1000 / input_sample_rate_);
-            if ((int32_t)(expected - now) > 0) {
-                vTaskDelay(expected - now);
-            }
-        }
-        last_read_tick_ = xTaskGetTickCount();
-
-        if (channels == 1) {
-            std::size_t requested = static_cast<std::size_t>(frames);
-            std::size_t got = mic_buffer_.Pop(dest, requested);
-            if (got < requested) {
-                std::memset(dest + got, 0, (requested - got) * sizeof(int16_t));
-            }
-            return samples;
-        }
-
-        // Interleaved [mic, ref] for AEC. The ref is the playback we sent to the phone,
-        // consumed at the same rate it was produced, so it stays time-aligned with the
-        // echo arriving at the mic.
-        std::vector<int16_t> mic(frames);
-        std::size_t got = mic_buffer_.Pop(mic.data(), static_cast<std::size_t>(frames));
-        if (got < static_cast<std::size_t>(frames)) {
-            std::memset(mic.data() + got, 0, (frames - got) * sizeof(int16_t));
-        }
-        int i = 0;
-        for (int f = 0; f < frames; ++f) {
-            dest[i++] = mic[f];
-            dest[i++] = PopRef();
-        }
-        return samples;
-    }
-
-    virtual int Write(const int16_t* data, int samples) override {
-        if (data == nullptr || samples <= 0) {
-            return 0;
-        }
-        speaker_buffer_.Push(data, static_cast<std::size_t>(samples));
-        // Keep a sliding window of the most recent playback as the AEC reference.
-        if (input_reference_) {
-            PushRef(data, samples);
-        }
-        return samples;
-    }
-
-    // Audio for this board is streamed to the phone, not played on the on-board
-    // DAC. Force the local output off so the board's amplifier / power stage stays
-    // silent (no idle current noise / hum). The actual samples still reach the
-    // phone via SpeakerTask -> speaker_buffer_.
-    void EnableOutput(bool /*enable*/) override {
-        AudioCodec::EnableOutput(false);
-    }
-
-    // True once the phone's upstream microphone stream is actually open. The
-    // auto-listen logic uses this to avoid entering a chat session (and blinking
-    // the LED) when the phone app that provides the mic/speaker is not running.
-    bool IsPhoneMicConnected() const { return mic_connected_; }
-    uint32_t MicConnectCount() const { return mic_connect_count_; }
-    uint32_t MicDisconnectCount() const { return mic_disconnect_count_; }
-    uint32_t SpeakerPostOk() const { return speaker_post_ok_.load(); }
-    uint32_t SpeakerPostFail() const { return speaker_post_fail_.load(); }
-    uint32_t SpeakerSamples() const { return speaker_samples_.load(); }
-
-    private:
-    static constexpr std::size_t kMicBufferSamples = 16000;      // 1 s @ 16 kHz
-    static constexpr std::size_t kSpeakerBufferSamples = 32000;  // 2 s @ 16 kHz
-    static constexpr std::size_t kRefBufferSamples = 16000;      // 1 s @ 16 kHz playback ref
-    static constexpr std::size_t kHttpReadSize = 1024;
-    // Batch PCM per POST to amortize the per-request TCP/HTTP overhead. Each
-    // POST opens a fresh connection, so sending 100 ms batches (~10/s) left the
-    // link below realtime and the phone's AudioTrack underran -> stutter. Batching
-    // ~500-600 ms per request keeps throughput at realtime while bounding latency.
-    // kPostSamples is the cap; kPostFlushMs is how long we wait to accumulate
-    // before flushing when audio arrives slower than realtime; the first batch
-    // after an idle gap uses kLowLatencyFlushMs so speech starts promptly.
-    static constexpr std::size_t kPostSamples = 16000;       // 1 s cap @ 16 kHz
-    static constexpr std::size_t kPostFlushMs = 600;          // steady-state flush window
-    static constexpr std::size_t kLowLatencyFlushMs = 120;    // first batch after idle
-
-    static void MicTaskEntry(void* arg) {
-        auto* codec = static_cast<NetworkAudioCodec*>(arg);
-        codec->MicTask();
-        vTaskDelete(nullptr);
-    }
-
-    static void SpeakerTaskEntry(void* arg) {
-        auto* codec = static_cast<NetworkAudioCodec*>(arg);
-        codec->SpeakerTask();
-        vTaskDelete(nullptr);
-    }
-
-    void PushAudioBytes(const uint8_t* data, std::size_t len, bool& pending_valid, uint8_t& pending) {
-        int16_t samples[kHttpReadSize / 2];
-        std::size_t count = 0;
-        for (std::size_t i = 0; i < len; ++i) {
-            uint8_t byte = data[i];
-            if (!pending_valid) {
-                pending = byte;
-                pending_valid = true;
-                continue;
-            }
-            uint16_t value = static_cast<uint16_t>(pending) | (static_cast<uint16_t>(byte) << 8);
-            pending_valid = false;
-            samples[count++] = static_cast<int16_t>(value);
-            if (count == kHttpReadSize / 2) {
-                mic_buffer_.Push(samples, count);
-                count = 0;
-            }
-        }
-        if (count > 0) {
-            mic_buffer_.Push(samples, count);
-        }
-    }
-
-    // AEC reference: a sliding window of the most recent playback samples. Read()
-    // consumes it at the same rate it was produced, so it stays time-aligned with
-    // the acoustic echo the phone mic captures and streams back.
-    void PushRef(const int16_t* data, int samples) {
-        if (write_pos_ - read_pos_ + samples > static_cast<int>(ref_buffer_.size())) {
-            read_pos_ = write_pos_ + samples - static_cast<int>(ref_buffer_.size());
-        }
-        if (read_pos_ != 0) {
-            if (write_pos_ != read_pos_) {
-                std::memmove(ref_buffer_.data(), ref_buffer_.data() + read_pos_,
-                             (write_pos_ - read_pos_) * sizeof(int16_t));
-            }
-            write_pos_ -= read_pos_;
-            read_pos_ = 0;
-        }
-        std::memcpy(&ref_buffer_[write_pos_], data,
-                    static_cast<std::size_t>(samples) * sizeof(int16_t));
-        write_pos_ += samples;
-    }
-
-    int16_t PopRef() {
-        if (read_pos_ >= write_pos_) {
-            read_pos_ = write_pos_ = 0;
-            return 0;
-        }
-        return ref_buffer_[read_pos_++];
-    }
-
-    void MicTask() {
-        const std::string url = PhoneAvUrl(PHONE_AV_MIC_PATH);
-        uint8_t raw[kHttpReadSize];
-        bool pending_valid = false;
-        uint8_t pending = 0;
-
-        while (running_) {
-            while (running_ && !PhoneAvNetworkReady()) {
-                vTaskDelay(pdMS_TO_TICKS(500));
-            }
-            if (!running_) {
-                break;
-            }
-
-            auto network = Board::GetInstance().GetNetwork();
-            auto http = network->CreateHttp(0);
-            if (auto opened = http->Open("GET", url); !opened) {
-                ESP_LOGW(TAG, "Failed to open phone microphone stream");
-                http->Close();
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                continue;
-            }
-            auto status = http->GetStatusCode();
-            if (!status || *status != 200) {
-                ESP_LOGW(TAG, "Phone microphone stream rejected the request");
-                http->Close();
-                vTaskDelay(pdMS_TO_TICKS(1000));
-                continue;
-            }
-
-            mic_connected_ = true;
-            mic_connect_count_++;
-            pending_valid = false;
-            zero_read_count_ = 0;
-            // Keep the WiFi modem fully awake while the phone's mic stream is
-            // active (modem sleep stalls TCP and used to cause reconnect storms).
-            // Set it ONCE per connection: calling it on every Read() churned the
-            // WiFi driver ~100x/s and disturbed speaker POSTs on the same link.
-            esp_wifi_set_ps(WIFI_PS_NONE);
-            while (running_ && PhoneAvNetworkReady()) {
-                auto ret = http->Read(reinterpret_cast<char*>(raw), sizeof(raw));
-                if (!ret) {
-                    ESP_LOGW(TAG, "Phone microphone stream read failed");
-                    break;
-                }
-                int n = *ret;
-                if (n == 0) {
-                    // A zero-length read is a transient gap or silence from the phone, not
-                    // necessarily a closed socket. Keep the connection open and retry; a
-                    // genuine close is detected through the !ret path above. Only bail out
-                    // after a very long idle (dead / half-open socket) so we can recover.
-                    if (++zero_read_count_ > 10000) {
-                        ESP_LOGW(TAG, "Phone microphone stream idle too long, reconnecting");
-                        break;
-                    }
-                    vTaskDelay(pdMS_TO_TICKS(5));
-                    continue;
-                }
-                zero_read_count_ = 0;
-                PushAudioBytes(raw, static_cast<std::size_t>(n), pending_valid, pending);
-            }
-            http->Close();
-            mic_connected_ = false;
-            mic_disconnect_count_++;
-            // The phone mic just dropped. If we were actively listening on it,
-            // leave the chat session so the device returns to idle (LED off)
-            // instead of sitting in a dead "listening" state with no audio.
-            if (Application::GetInstance().GetDeviceState() == kDeviceStateListening) {
-                Application::GetInstance().StopListening();
-            }
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-    }
-
-    bool PostPcm(const std::string& url, const int16_t* data, std::size_t samples) {
-        if (!PhoneAvNetworkReady()) {
-            return false;
-        }
-        auto network = Board::GetInstance().GetNetwork();
-        auto http = network->CreateHttp(0);
-        std::string body(reinterpret_cast<const char*>(data), samples * sizeof(int16_t));
-        http->SetHeader("Content-Type", "application/octet-stream");
-        http->SetContent(std::move(body));
-        if (auto opened = http->Open("POST", url); !opened) {
-            http->Close();
-            return false;
-        }
-        auto status = http->GetStatusCode();
-        http->ReadAll();
-        http->Close();
-        return status && *status == 200;
-    }
-
-    void SpeakerTask() {
-        const std::string url = PhoneAvUrl(PHONE_AV_SPEAKER_PATH);
-        while (running_) {
-            if (!PhoneAvNetworkReady()) {
-                vTaskDelay(pdMS_TO_TICKS(500));
-                continue;
-            }
-            // Accumulate PCM before one POST. The decoded TTS arrives as 20 ms
-            // frames; sending each frame separately meant ~50 TCP handshakes per
-            // second and any slow round trip made the ring buffer overflow and
-            // drop audio. Batching ~kPostFlushMs of audio per request amortizes
-            // the per-POST TCP/HTTP overhead so the link sustains realtime
-            // throughput (otherwise the phone's AudioTrack underruns -> stutter).
-            // The first batch after an idle gap flushes quickly (low latency) so
-            // speech starts promptly; later batches batch longer for efficiency.
-            const bool was_empty = speaker_buffer_.Available() == 0;
-            const TickType_t flush_ms = was_empty ? kLowLatencyFlushMs : kPostFlushMs;
-            std::size_t count = 0;
-            const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(flush_ms);
-            while (count < kPostSamples && running_) {
-                count += speaker_buffer_.Pop(speak_chunk_.data() + count, kPostSamples - count);
-                if (count >= kPostSamples || xTaskGetTickCount() >= deadline) {
-                    break;
-                }
-                // Must be >= one tick: with the default CONFIG_FREERTOS_HZ=100,
-                // pdMS_TO_TICKS(5) rounds down to 0, so vTaskDelay(0) does not
-                // yield and this accumulation loop busy-waits (starving IDLE0 and
-                // triggering the task watchdog while the phone app is idle).
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
-            if (count == 0) {
-                continue;
-            }
-            // A failed POST used to discard the popped samples outright. Retry
-            // once with the same buffer so a transient network hiccup does not
-            // punch a hole in the playback.
-            bool ok = PostPcm(url, speak_chunk_.data(), count);
-            if (!ok) {
-                vTaskDelay(pdMS_TO_TICKS(20));
-                ok = PostPcm(url, speak_chunk_.data(), count);
-            }
-            if (ok) {
-                speaker_post_ok_.fetch_add(1);
-                speaker_samples_.fetch_add(static_cast<uint32_t>(count));
-            } else {
-                speaker_post_fail_.fetch_add(1);
-                vTaskDelay(pdMS_TO_TICKS(50));
-            }
-        }
-    }
-
-    PcmRingBuffer mic_buffer_;
-    PcmRingBuffer speaker_buffer_;
-    std::vector<int16_t> ref_buffer_;
-    // Reusable send buffer for SpeakerTask. Sized at kPostSamples (1 s); kept as a
-    // member (heap) rather than a stack local so it never overflows the task stack.
-    // IMPORTANT: use the size constructor, NOT braces. std::vector<int16_t>{16000}
-    // selects initializer_list<int16_t> (16000 fits in int16_t), producing a
-    // 1-element vector; SpeakerTask then writes up to 16000 int16 into that 2-byte
-    // allocation, smashing neighbouring heap blocks (FreeRTOS TCBs live there)
-    // with PCM data and rebooting in vPortYieldFromInt with a StoreProhibited.
-    std::vector<int16_t> speak_chunk_ = std::vector<int16_t>(kPostSamples, 0);
-    int read_pos_ = 0;
-    int write_pos_ = 0;
-    std::atomic<bool> started_{false};
-    std::atomic<bool> running_{false};
-    TickType_t last_read_tick_{0};
-    int zero_read_count_ = 0;
-    std::atomic<bool> mic_connected_{false};
-    std::atomic<uint32_t> mic_connect_count_{0};
-    std::atomic<uint32_t> mic_disconnect_count_{0};
-    std::atomic<uint32_t> speaker_post_ok_{0};
-    std::atomic<uint32_t> speaker_post_fail_{0};
-    std::atomic<uint32_t> speaker_samples_{0};
-    };
 
 class NetworkCamera : public Camera {
 public:
@@ -1080,6 +720,8 @@ public:
 class PhoneAvBoard : public WifiBoard {
 public:
     PhoneAvBoard() : boot_button_(BOOT_BUTTON_GPIO) {
+        InitializeDisplay();
+
         // Standard xiaozhi behaviour: a tap on the BOOT button enters WiFi
         // config mode while the device is still starting (so you can re-bind /
         // factory-reset from the captive portal at http://192.168.4.1), and
@@ -1117,13 +759,14 @@ public:
                     if (!board->IsNetworkReady()) {
                         return;
                     }
-                    // Only start a conversation when the phone's microphone stream is
-                    // actually open. If the phone app is closed (or the host is wrong)
-                    // there is no audio device, so entering listening would immediately
-                    // fail and the device would blink forever in an idle<->listening loop.
+                    // Only start a conversation when a microphone is actually
+                    // available: the phone mic stream is open, or a local I2S/PDM
+                    // mic initialized successfully. Otherwise entering listening
+                    // would immediately fail and the device would blink forever
+                    // in an idle<->listening loop.
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
-                        auto* codec = static_cast<NetworkAudioCodec*>(board->GetAudioCodec());
-                        if (codec != nullptr && codec->IsPhoneMicConnected()) {
+                        auto* codec = static_cast<PhoneAvAudioCodec*>(board->GetAudioCodec());
+                        if (codec != nullptr && codec->IsMicAvailable()) {
                             // Let HandleToggleChatEvent() open the audio channel through
                             // the standard Connecting state. Do NOT call
                             // SetListeningMode() here: it would jump straight to
@@ -1140,6 +783,11 @@ public:
         };
         esp_timer_create(&auto_listen_timer_args, &auto_listen_timer_);
         esp_timer_start_periodic(auto_listen_timer_, kAutoListenIntervalUs);
+
+        // Construct the codec here (on the main task) instead of letting the
+        // first status/auto-listen callback do it on the small esp_timer or
+        // httpd stack. Hardware I2S initialization happens in the constructor.
+        AudioCodecPtr();
     }
 
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) override {
@@ -1170,23 +818,53 @@ public:
     }
 
     bool IsPhoneMicConnected() {
-        auto* codec = static_cast<NetworkAudioCodec*>(GetAudioCodec());
+        auto* codec = AudioCodecPtr();
         return codec != nullptr && codec->IsPhoneMicConnected();
     }
+    bool IsMicAvailable() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr && codec->IsMicAvailable();
+    }
     uint32_t MicConnectCount() {
-        auto* codec = static_cast<NetworkAudioCodec*>(GetAudioCodec());
+        auto* codec = AudioCodecPtr();
         return codec != nullptr ? codec->MicConnectCount() : 0;
     }
     uint32_t MicDisconnectCount() {
-        auto* codec = static_cast<NetworkAudioCodec*>(GetAudioCodec());
+        auto* codec = AudioCodecPtr();
         return codec != nullptr ? codec->MicDisconnectCount() : 0;
     }
     uint32_t UptimeMs() const {
         return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
     }
 
+    PhoneAvSource SelectedMicSource() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->SelectedMicSource() : PhoneAvSource::kPhone;
+    }
+    PhoneAvSource SelectedSpkSource() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->SelectedSpkSource() : PhoneAvSource::kPhone;
+    }
+    PhoneAvSource ActiveMicSource() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->ActiveMicSource() : PhoneAvSource::kPhone;
+    }
+    PhoneAvSource ActiveSpkSource() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->ActiveSpkSource() : PhoneAvSource::kPhone;
+    }
+    bool HwMicActive() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr && codec->HwMicActive();
+    }
+    bool HwSpkActive() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr && codec->HwSpkActive();
+    }
+    bool HwDisplayActive() const { return hw_display_ != nullptr; }
+
     virtual AudioCodec* GetAudioCodec() override {
-        static NetworkAudioCodec codec(AUDIO_INPUT_SAMPLE_RATE, AUDIO_OUTPUT_SAMPLE_RATE);
+        static PhoneAvAudioCodec codec;
         return &codec;
     }
 
@@ -1196,9 +874,10 @@ public:
     }
 
     virtual Display* GetDisplay() override {
-        static PhoneAvDisplay display;
-        return &display;
+        return display_router_.get();
     }
+
+    virtual Backlight* GetBacklight() override { return backlight_; }
 
     virtual Led* GetLed() override {
         static PhoneAvLed led(BUILTIN_LED_GPIO);
@@ -1206,10 +885,114 @@ public:
     }
 
 private:
+    PhoneAvAudioCodec* AudioCodecPtr() {
+        return static_cast<PhoneAvAudioCodec*>(GetAudioCodec());
+    }
+
+    void InitializeDisplay() {
+        const PhoneAvSource source = PhoneAvGetSource(kPhoneAvSrcDispKey);
+        if (source == PhoneAvSource::kHardware) {
+            if (!PhoneAvHwDispConfigured()) {
+                ESP_LOGE(TAG,
+                         "Local display selected but PHONE_AV_HW_DISP_* is not configured; "
+                         "using the 8080 screen");
+            } else if (!InitializeHardwareDisplay()) {
+                ESP_LOGE(TAG, "Local display init failed; falling back to the 8080 screen");
+                Settings settings(kPhoneAvConfigNs, true);
+                settings.SetString(kPhoneAvSrcDispKey,
+                                   PhoneAvSourceToken(PhoneAvSource::kPhone));
+            }
+        }
+        display_router_ = std::make_unique<PhoneAvDisplayRouter>(hw_display_);
+    }
+
+    bool InitializeHardwareDisplay() {
+#if PHONE_AV_HW_DISP_TYPE == 0
+        return false;
+#else
+        spi_bus_config_t buscfg = {};
+        buscfg.mosi_io_num = PHONE_AV_HW_DISP_MOSI;
+        buscfg.miso_io_num = GPIO_NUM_NC;
+        buscfg.sclk_io_num = PHONE_AV_HW_DISP_CLK;
+        buscfg.quadwp_io_num = GPIO_NUM_NC;
+        buscfg.quadhd_io_num = GPIO_NUM_NC;
+        buscfg.max_transfer_sz =
+            PHONE_AV_HW_DISP_WIDTH * PHONE_AV_HW_DISP_HEIGHT * sizeof(uint16_t);
+        esp_err_t err = spi_bus_initialize(SPI3_HOST, &buscfg, SPI_DMA_CH_AUTO);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize display SPI bus: %s", esp_err_to_name(err));
+            return false;
+        }
+
+        esp_lcd_panel_io_handle_t panel_io = nullptr;
+        esp_lcd_panel_handle_t panel = nullptr;
+        esp_lcd_panel_io_spi_config_t io_config = {};
+        io_config.cs_gpio_num = PHONE_AV_HW_DISP_CS;
+        io_config.dc_gpio_num = PHONE_AV_HW_DISP_DC;
+        io_config.spi_mode = PHONE_AV_HW_DISP_SPI_MODE;
+        io_config.pclk_hz = PHONE_AV_HW_DISP_PCLK_HZ;
+        io_config.trans_queue_depth = 10;
+        io_config.lcd_cmd_bits = 8;
+        io_config.lcd_param_bits = 8;
+        err = esp_lcd_new_panel_io_spi(SPI3_HOST, &io_config, &panel_io);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to create display panel IO: %s", esp_err_to_name(err));
+            return false;
+        }
+
+        esp_lcd_panel_dev_config_t panel_config = {};
+        panel_config.reset_gpio_num = PHONE_AV_HW_DISP_RST;
+        panel_config.rgb_ele_order = PHONE_AV_HW_DISP_RGB_ORDER
+                                         ? LCD_RGB_ELEMENT_ORDER_BGR
+                                         : LCD_RGB_ELEMENT_ORDER_RGB;
+        panel_config.bits_per_pixel = 16;
+#if PHONE_AV_HW_DISP_TYPE == 2
+        err = esp_lcd_new_panel_ili9341(panel_io, &panel_config, &panel);
+#elif PHONE_AV_HW_DISP_TYPE == 3
+        err = esp_lcd_new_panel_gc9a01(panel_io, &panel_config, &panel);
+#else
+        err = esp_lcd_new_panel_st7789(panel_io, &panel_config, &panel);
+#endif
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to create display panel: %s", esp_err_to_name(err));
+            esp_lcd_panel_io_del(panel_io);
+            return false;
+        }
+
+        esp_lcd_panel_reset(panel);
+        err = esp_lcd_panel_init(panel);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize display panel: %s", esp_err_to_name(err));
+            esp_lcd_panel_del(panel);
+            esp_lcd_panel_io_del(panel_io);
+            return false;
+        }
+        esp_lcd_panel_invert_color(panel, PHONE_AV_HW_DISP_INVERT);
+        esp_lcd_panel_swap_xy(panel, PHONE_AV_HW_DISP_SWAP_XY);
+        esp_lcd_panel_mirror(panel, PHONE_AV_HW_DISP_MIRROR_X, PHONE_AV_HW_DISP_MIRROR_Y);
+
+        hw_display_ = new SpiLcdDisplay(
+            panel_io, panel, PHONE_AV_HW_DISP_WIDTH, PHONE_AV_HW_DISP_HEIGHT,
+            PHONE_AV_HW_DISP_OFFSET_X, PHONE_AV_HW_DISP_OFFSET_Y, PHONE_AV_HW_DISP_MIRROR_X,
+            PHONE_AV_HW_DISP_MIRROR_Y, PHONE_AV_HW_DISP_SWAP_XY);
+        if (PHONE_AV_HW_DISP_BL != GPIO_NUM_NC) {
+            backlight_ =
+                new PwmBacklight(PHONE_AV_HW_DISP_BL, !PHONE_AV_HW_DISP_BL_ACTIVE_HIGH);
+            backlight_->RestoreBrightness();
+        }
+        ESP_LOGI(TAG, "Local LCD ready (%dx%d, type=%d)", PHONE_AV_HW_DISP_WIDTH,
+                 PHONE_AV_HW_DISP_HEIGHT, PHONE_AV_HW_DISP_TYPE);
+        return true;
+#endif
+    }
+
     std::atomic<bool> network_ready_{false};
     NetworkEventCallback user_network_event_callback_;
     esp_timer_handle_t auto_listen_timer_{nullptr};
     Button boot_button_;
+    Display* hw_display_ = nullptr;
+    PwmBacklight* backlight_ = nullptr;
+    std::unique_ptr<PhoneAvDisplayRouter> display_router_;
 };
 
 bool PhoneAvNetworkReady() {
@@ -1240,11 +1023,23 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
     const uint32_t mc = board->MicConnectCount();
     const uint32_t md = board->MicDisconnectCount();
     const uint32_t up = board->UptimeMs();
-    auto* codec = static_cast<NetworkAudioCodec*>(board->GetAudioCodec());
+    auto* codec = static_cast<PhoneAvAudioCodec*>(board->GetAudioCodec());
     const uint32_t sp_ok = codec != nullptr ? codec->SpeakerPostOk() : 0;
     const uint32_t sp_fail = codec != nullptr ? codec->SpeakerPostFail() : 0;
     const uint32_t sp_samples = codec != nullptr ? codec->SpeakerSamples() : 0;
     const bool assets_valid = Assets::GetInstance().partition_valid();
+
+    const PhoneAvSource src_spk = board->SelectedSpkSource();
+    const PhoneAvSource src_mic = board->SelectedMicSource();
+    const PhoneAvSource src_disp = PhoneAvGetSource(kPhoneAvSrcDispKey);
+    const PhoneAvSource active_spk = board->ActiveSpkSource();
+    const PhoneAvSource active_mic = board->ActiveMicSource();
+    const bool active_disp_hw = board->HwDisplayActive();
+    const bool hw_spk_configured = PhoneAvHwSpkConfigured();
+    const bool hw_mic_configured = PhoneAvHwMicConfigured();
+    const bool hw_disp_configured = PhoneAvHwDispConfigured();
+    const bool hw_spk_active = board->HwSpkActive();
+    const bool hw_mic_active = board->HwMicActive();
 
     const char* rr = "unknown";
     switch (esp_reset_reason()) {
@@ -1307,6 +1102,18 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         "  \"state\": \"" + state_str + "\",\n" +
         "  \"ip\": \"" + local_ip + "\",\n" +
         "  \"phone_av_host\": \"" + PhoneAvJsonEscape(std::string(PhoneAvHost())) + "\",\n" +
+        "  \"source_spk\": \"" + PhoneAvSourceToken(src_spk) + "\",\n" +
+        "  \"source_mic\": \"" + PhoneAvSourceToken(src_mic) + "\",\n" +
+        "  \"source_disp\": \"" + PhoneAvSourceToken(src_disp) + "\",\n" +
+        "  \"active_spk\": \"" + PhoneAvSourceToken(active_spk) + "\",\n" +
+        "  \"active_mic\": \"" + PhoneAvSourceToken(active_mic) + "\",\n" +
+        "  \"active_disp\": \"" + std::string(active_disp_hw ? "hw" : "phone") + "\",\n" +
+        "  \"hw_spk_configured\": " + (hw_spk_configured ? "true" : "false") + ",\n" +
+        "  \"hw_mic_configured\": " + (hw_mic_configured ? "true" : "false") + ",\n" +
+        "  \"hw_disp_configured\": " + (hw_disp_configured ? "true" : "false") + ",\n" +
+        "  \"hw_spk_active\": " + (hw_spk_active ? "true" : "false") + ",\n" +
+        "  \"hw_mic_active\": " + (hw_mic_active ? "true" : "false") + ",\n" +
+        "  \"hw_disp_active\": " + (active_disp_hw ? "true" : "false") + ",\n" +
         "  \"voice_detected\": " + (voice ? "true" : "false") + ",\n" +
         "  \"phone_mic_connected\": " + (mic ? "true" : "false") + ",\n" +
         "  \"network_ready\": " + (net ? "true" : "false") + ",\n" +
