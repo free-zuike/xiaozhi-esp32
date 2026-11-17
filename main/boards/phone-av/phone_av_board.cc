@@ -995,10 +995,6 @@ private:
     std::unique_ptr<PhoneAvDisplayRouter> display_router_;
 };
 
-bool PhoneAvNetworkReady() {
-    return static_cast<PhoneAvBoard&>(Board::GetInstance()).IsNetworkReady();
-}
-
 esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
     auto& app = Application::GetInstance();
     DeviceState state = app.GetDeviceState();
@@ -1139,5 +1135,11 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
 }
 
 }  // namespace
+
+// Must stay outside the anonymous namespace: phone_av_audio.cc calls this
+// function, so it needs external linkage.
+bool PhoneAvNetworkReady() {
+    return static_cast<PhoneAvBoard&>(Board::GetInstance()).IsNetworkReady();
+}
 
 DECLARE_BOARD(PhoneAvBoard);
