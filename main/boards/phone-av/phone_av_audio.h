@@ -216,7 +216,7 @@ protected:
 private:
     static constexpr std::size_t kRefBufferSamples = 16000;  // 1 s @ 16 kHz
     static constexpr std::size_t kMicFrameBufferSamples = 2048;
-    static constexpr std::size_t kProbeSamples = 960;  // 60 ms @ 16 kHz
+    static constexpr std::size_t kProbeSamples = 1920;  // 120 ms @ 16 kHz
     // Playback is "recent" for this long after the last Write(); it covers the
     // 600 ms phone POST batch, HTTP/phone latency and the TTS tail. The mic is
     // muted during this window by default, and the auto-listen voice detector

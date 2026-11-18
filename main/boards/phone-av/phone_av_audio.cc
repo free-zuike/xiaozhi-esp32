@@ -703,6 +703,10 @@ int PhoneAvHwAudio::ProbeMic(int16_t* dest, int samples) {
             return 0;
         }
         rx_enabled_ = true;
+        // Give the mic and I2S DMA a few frames to start producing data;
+        // reading immediately after enable returned zero samples and kept the
+        // idle auto-listen gate from ever arming.
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
     const int n = ReadLocked(dest, samples, 0.0f);
     if (!was_enabled) {
