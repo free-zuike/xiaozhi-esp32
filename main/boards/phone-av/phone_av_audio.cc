@@ -28,6 +28,32 @@ const char* SourceName(PhoneAvSource source) {
     return source == PhoneAvSource::kHardware ? "hardware" : "phone";
 }
 
+/* The Android app's VOICE_COMMUNICATION AudioRecord only delivers samples
+ * after the app enters voice-call mode, which its TTS playback path does by
+ * calling enterVoiceCallMode(). When the speaker is local, no TTS is sent to
+ * the phone, so the mic stream stays silent. A short silent upload wakes the
+ * talk route without making an audible sound. */
+void PrimePhoneTalkRoute() {
+    if (!PhoneAvNetworkReady()) {
+        return;
+    }
+    auto network = Board::GetInstance().GetNetwork();
+    auto http = network->CreateHttp(0);
+    std::vector<int16_t> silence(320, 0);  // 20 ms @ 16 kHz
+    std::string body(reinterpret_cast<const char*>(silence.data()),
+                     silence.size() * sizeof(int16_t));
+    http->SetHeader("Content-Type", "application/octet-stream");
+    http->SetContent(std::move(body));
+    if (auto opened = http->Open("POST", PhoneAvUrl(PHONE_AV_SPEAKER_PATH)); !opened) {
+        http->Close();
+        return;
+    }
+    auto status = http->GetStatusCode();
+    http->ReadAll();
+    http->Close();
+    ESP_LOGI(TAG, "Phone talk route prime: %d", status ? *status : -1);
+}
+
 }  // namespace
 
 PcmRingBuffer::PcmRingBuffer(std::size_t capacity)
@@ -171,6 +197,10 @@ void PhoneMicStream::Task() {
         connect_count_.fetch_add(1);
         pending_valid = false;
         zero_read_count_ = 0;
+        if (!primed_) {
+            PrimePhoneTalkRoute();
+            primed_ = true;
+        }
         // Keep the WiFi modem fully awake while the phone's mic stream is
         // active (modem sleep stalls TCP and used to cause reconnect storms).
         esp_wifi_set_ps(WIFI_PS_NONE);
@@ -197,6 +227,7 @@ void PhoneMicStream::Task() {
         }
         http->Close();
         connected_ = false;
+        primed_ = false;
         disconnect_count_.fetch_add(1);
         // If the phone mic just dropped while we were listening, leave the
         // chat session so the device returns to idle instead of sitting in a

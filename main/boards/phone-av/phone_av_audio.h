@@ -84,6 +84,7 @@ private:
     std::atomic<uint32_t> connect_count_{0};
     std::atomic<uint32_t> disconnect_count_{0};
     int zero_read_count_ = 0;
+    bool primed_ = false;
 };
 
 /* Phone speaker sink: batches PCM and POSTs it to /audio/upload/16000. */
