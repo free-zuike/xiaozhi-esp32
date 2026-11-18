@@ -200,6 +200,13 @@ void PhoneMicStream::Task() {
         if (!primed_) {
             PrimePhoneTalkRoute();
             primed_ = true;
+            // The app opened this AudioRecord before the talk mode was active.
+            // Close and reconnect so it creates a fresh AudioRecord in call
+            // mode; the old one keeps emitting silence after the route change.
+            http->Close();
+            connected_ = false;
+            vTaskDelay(pdMS_TO_TICKS(300));
+            continue;
         }
         // Keep the WiFi modem fully awake while the phone's mic stream is
         // active (modem sleep stalls TCP and used to cause reconnect storms).
