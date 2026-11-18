@@ -33,9 +33,9 @@ const char* SourceName(PhoneAvSource source) {
  * calling enterVoiceCallMode(). When the speaker is local, no TTS is sent to
  * the phone, so the mic stream stays silent. A short silent upload wakes the
  * talk route without making an audible sound. */
-void PrimePhoneTalkRoute() {
+bool PrimePhoneTalkRoute() {
     if (!PhoneAvNetworkReady()) {
-        return;
+        return false;
     }
     auto network = Board::GetInstance().GetNetwork();
     auto http = network->CreateHttp(0);
@@ -46,12 +46,13 @@ void PrimePhoneTalkRoute() {
     http->SetContent(std::move(body));
     if (auto opened = http->Open("POST", PhoneAvUrl(PHONE_AV_SPEAKER_PATH)); !opened) {
         http->Close();
-        return;
+        return false;
     }
     auto status = http->GetStatusCode();
     http->ReadAll();
     http->Close();
     ESP_LOGI(TAG, "Phone talk route prime: %d", status ? *status : -1);
+    return status && *status == 200;
 }
 
 }  // namespace
@@ -177,6 +178,17 @@ void PhoneMicStream::Task() {
             break;
         }
 
+        if (!primed_) {
+            if (!PrimePhoneTalkRoute()) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+            primed_ = true;
+            // Let the app's player thread enter MODE_IN_COMMUNICATION before
+            // opening /audio/pcm, so its AudioRecord is created in call mode.
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+
         auto network = Board::GetInstance().GetNetwork();
         auto http = network->CreateHttp(0);
         if (auto opened = http->Open("GET", url); !opened) {
@@ -197,17 +209,6 @@ void PhoneMicStream::Task() {
         connect_count_.fetch_add(1);
         pending_valid = false;
         zero_read_count_ = 0;
-        if (!primed_) {
-            PrimePhoneTalkRoute();
-            primed_ = true;
-            // The app opened this AudioRecord before the talk mode was active.
-            // Close and reconnect so it creates a fresh AudioRecord in call
-            // mode; the old one keeps emitting silence after the route change.
-            http->Close();
-            connected_ = false;
-            vTaskDelay(pdMS_TO_TICKS(300));
-            continue;
-        }
         // Keep the WiFi modem fully awake while the phone's mic stream is
         // active (modem sleep stalls TCP and used to cause reconnect storms).
         esp_wifi_set_ps(WIFI_PS_NONE);
