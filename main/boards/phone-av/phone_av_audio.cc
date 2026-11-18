@@ -794,6 +794,12 @@ void PhoneAvAudioCodec::Start() {
     if (phone_spk_) {
         phone_spk_->Start();
     }
+    if (active_mic_ == PhoneAvSource::kHardware && hw_) {
+        // Keep the hardware mic clocked while idle. The INMP441 needs a
+        // stable clock for longer than one probe window; toggling RX every
+        // second made the idle voice probe read zeros.
+        hw_->EnableMic(true);
+    }
     ESP_LOGI(TAG, "phone-av audio started");
 }
 
@@ -802,7 +808,11 @@ void PhoneAvAudioCodec::EnableInput(bool enable) {
         return;
     }
     if (active_mic_ == PhoneAvSource::kHardware && hw_) {
-        hw_->EnableMic(enable);
+        if (enable) {
+            hw_->EnableMic(true);
+        }
+        // Do not disable RX on false: the idle auto-listen probe needs it
+        // clocked. The base input_enabled_ flag still stops AudioService reads.
     }
     AudioCodec::EnableInput(enable);
 }
