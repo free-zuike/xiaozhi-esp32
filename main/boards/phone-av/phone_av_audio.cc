@@ -251,6 +251,10 @@ PhoneSpeakerSink::PhoneSpeakerSink(std::size_t capacity_samples) : buffer_(capac
 
 PhoneSpeakerSink::~PhoneSpeakerSink() {
     running_ = false;
+    if (http_) {
+        http_->Close();
+        http_.reset();
+    }
 }
 
 void PhoneSpeakerSink::Start() {
@@ -277,18 +281,28 @@ bool PhoneSpeakerSink::PostPcm(const std::string& url, const int16_t* data,
     if (!PhoneAvNetworkReady()) {
         return false;
     }
-    auto network = Board::GetInstance().GetNetwork();
-    auto http = network->CreateHttp(0);
+    // Reuse one keep-alive connection across batches. A fresh TCP handshake
+    // per POST left ~100-150 ms gaps between ~600 ms audio chunks, which made
+    // the phone's player underrun and sound like harsh electrical noise.
+    if (!http_) {
+        auto network = Board::GetInstance().GetNetwork();
+        http_ = network->CreateHttp(0);
+        http_->SetKeepAlive(true);
+        http_->SetHeader("Content-Type", "application/octet-stream");
+    }
     std::string body(reinterpret_cast<const char*>(data), samples * sizeof(int16_t));
-    http->SetHeader("Content-Type", "application/octet-stream");
-    http->SetContent(std::move(body));
-    if (auto opened = http->Open("POST", url); !opened) {
-        http->Close();
+    http_->SetContent(std::move(body));
+    if (auto opened = http_->Open("POST", url); !opened) {
+        // The phone app or the connection went away; drop the stale client so
+        // the next attempt starts fresh.
+        http_->Close();
+        http_.reset();
         return false;
     }
-    auto status = http->GetStatusCode();
-    http->ReadAll();
-    http->Close();
+    auto status = http_->GetStatusCode();
+    http_->ReadAll();
+    // Deliberately no Close(): the keep-alive connection is reused by the
+    // next POST (as long as the phone's HTTP server keeps it open).
     return status && *status == 200;
 }
 

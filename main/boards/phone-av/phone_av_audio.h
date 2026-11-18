@@ -36,6 +36,8 @@ std::string PhoneAvHost();
 std::string PhoneAvUrl(const char* path);
 bool PhoneAvNetworkReady();
 
+class Http;  // esp-ml307 HTTP client, held across speaker POSTs for keep-alive.
+
 /* Single-producer/single-consumer PCM ring. Pushing into a full buffer drops
  * the oldest samples, matching the previous phone-av implementation. */
 class PcmRingBuffer {
@@ -113,6 +115,10 @@ private:
     // initializer_list<int16_t> overload and allocates one element, which used
     // to smash the heap when SpeakerTask wrote a full second of PCM.
     std::vector<int16_t> speak_chunk_ = std::vector<int16_t>(kPostSamples, 0);
+    // Persistent HTTP client for the PCM uploads. One keep-alive connection
+    // reused across batches removes the TCP setup gap between audio bursts
+    // that made the phone's player underrun and crackle.
+    std::unique_ptr<Http> http_;
     std::atomic<bool> running_{false};
     std::atomic<bool> started_{false};
     std::atomic<uint32_t> post_ok_{0};
