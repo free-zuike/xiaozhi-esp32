@@ -1,8 +1,5 @@
 #include "audio_service.h"
 #include <esp_log.h>
-#include <esp_heap_caps.h>
-#include <esp_attr.h>
-#include <cstdio>
 #include <cstring>
 
 #define RATE_CVT_CFG(_src_rate, _dest_rate, _channel)                                        \
@@ -48,134 +45,6 @@ AudioService::~AudioService() {
     }
 }
 
-/* Debug: encode silence frames with several Opus encoder configurations.
- * On this board the first esp_opus_enc_process() call reliably corrupts
- * whatever sits next to it (in one build the logging lock queue died and the
- * next ESP_LOG* hung until the interrupt watchdog fired; in another the
- * stdout VFS died and the next printf faulted on NULL). Suspects:
- *  - the main task's 8 KB stack (opus_encode uses deep SILK/CELT stacks), so
- *    the matrix now runs in its own 32 KB-stack task,
- *  - the recommended output buffer (227 bytes) being smaller than one frame
- *    at the auto bitrate (~300 bytes), so every variant encodes first with a
- *    4096-byte output buffer and then with the recommended one.
- * Every step is reported with printf(), which does not take the log lock.
- * A corrupting call also reboots the board, so the next variant index is
- * parked in RTC memory before each risky call; across reboots the whole
- * matrix still gets tested. */
-RTC_NOINIT_ATTR static int s_opus_variant_start;
-RTC_NOINIT_ATTR static int s_opus_matrix_done;
-
-static void OpusConfigMatrixSelfTest() {
-    struct Variant {
-        const char* name;
-        int application_mode;
-        bool enable_dtx;
-        bool enable_vbr;
-        int bitrate;
-        int frame_duration_enum;
-    };
-    static const Variant kVariants[] = {
-        {"voip_dtx", ESP_OPUS_ENC_APPLICATION_VOIP, true, true, ESP_OPUS_BITRATE_AUTO,
-         ESP_OPUS_ENC_FRAME_DURATION_60_MS},
-        {"voip_nodtx", ESP_OPUS_ENC_APPLICATION_VOIP, false, true, ESP_OPUS_BITRATE_AUTO,
-         ESP_OPUS_ENC_FRAME_DURATION_60_MS},
-        {"audio_dtx", ESP_OPUS_ENC_APPLICATION_AUDIO, true, true, ESP_OPUS_BITRATE_AUTO,
-         ESP_OPUS_ENC_FRAME_DURATION_60_MS},
-        {"audio_nodtx", ESP_OPUS_ENC_APPLICATION_AUDIO, false, true, ESP_OPUS_BITRATE_AUTO,
-         ESP_OPUS_ENC_FRAME_DURATION_60_MS},
-        {"audio_nodtx_20ms", ESP_OPUS_ENC_APPLICATION_AUDIO, false, true, ESP_OPUS_BITRATE_AUTO,
-         ESP_OPUS_ENC_FRAME_DURATION_20_MS},
-        {"audio_nodtx_32k", ESP_OPUS_ENC_APPLICATION_AUDIO, false, true, 32000,
-         ESP_OPUS_ENC_FRAME_DURATION_60_MS},
-    };
-    const int count = sizeof(kVariants) / sizeof(kVariants[0]);
-    if (s_opus_variant_start < 0 || s_opus_variant_start >= count) {
-        s_opus_variant_start = 0;
-    }
-    printf("OPUSCFG start_index=%d of %d\n", s_opus_variant_start, count);
-    fflush(stdout);
-    for (int i = s_opus_variant_start; i < count; ++i) {
-        const auto& v = kVariants[i];
-        /* Park the next variant index first: if the encode below crashes, the
-         * next boot continues with the remaining variants instead of looping
-         * on the same one forever. */
-        s_opus_variant_start = i + 1;
-        printf("OPUSCFG [%d %s] begin\n", i, v.name);
-        fflush(stdout);
-        esp_opus_enc_config_t cfg = AS_OPUS_ENC_CONFIG();
-        cfg.application_mode = (esp_opus_enc_application_t)v.application_mode;
-        cfg.enable_dtx = v.enable_dtx;
-        cfg.enable_vbr = v.enable_vbr;
-        cfg.bitrate = v.bitrate;
-        cfg.frame_duration = (esp_opus_enc_frame_duration_t)v.frame_duration_enum;
-        void* enc = nullptr;
-        auto open_ret = esp_opus_enc_open(&cfg, sizeof(esp_opus_enc_config_t), &enc);
-        printf("OPUSCFG [%d %s] open ret=%d enc=%p\n", i, v.name, open_ret, enc);
-        fflush(stdout);
-        if (enc == nullptr) {
-            continue;
-        }
-        int frame_bytes = 0;
-        int out_bytes = 0;
-        esp_opus_enc_get_frame_size(enc, &frame_bytes, &out_bytes);
-        printf("OPUSCFG [%d %s] frame=%d out=%d\n", i, v.name, frame_bytes, out_bytes);
-        fflush(stdout);
-        if (frame_bytes > 0) {
-            std::vector<int16_t> silence(frame_bytes / sizeof(int16_t), 0);
-            esp_audio_enc_in_frame_t in = {
-                .buffer = reinterpret_cast<uint8_t*>(silence.data()),
-                .len = (uint32_t)(silence.size() * sizeof(int16_t)),
-            };
-            /* First with a large output buffer: proves whether the small
-             * recommended buffer is the trigger. */
-            std::vector<uint8_t> big(4096);
-            esp_audio_enc_out_frame_t out = {
-                .buffer = big.data(),
-                .len = (uint32_t)big.size(),
-                .encoded_bytes = 0,
-            };
-            auto ret_big = esp_opus_enc_process(enc, &in, &out);
-            printf("OPUSCFG [%d %s] big(4096) ret=%d encoded=%u\n", i, v.name, ret_big,
-                   (unsigned)out.encoded_bytes);
-            fflush(stdout);
-            /* Tripwire: if the encode above smashed the console/log systems,
-             * this log call hangs in a critical section and the interrupt
-             * watchdog prints a backtrace — the last OPUSCFG line identifies
-             * the culprit variant. */
-            ESP_LOGI(TAG, "OPUSCFG [%d %s] log system alive", i, v.name);
-            bool heap_ok = heap_caps_check_integrity_all(true);
-            printf("OPUSCFG [%d %s] heap_ok=%d\n", i, v.name, heap_ok ? 1 : 0);
-            fflush(stdout);
-            /* Then with the recommended (small) output buffer. */
-            if (out_bytes > 0) {
-                std::vector<uint8_t> recommended(out_bytes);
-                esp_audio_enc_out_frame_t out2 = {
-                    .buffer = recommended.data(),
-                    .len = (uint32_t)recommended.size(),
-                    .encoded_bytes = 0,
-                };
-                auto ret_small = esp_opus_enc_process(enc, &in, &out2);
-                printf("OPUSCFG [%d %s] rec(%d) ret=%d encoded=%u\n", i, v.name, out_bytes,
-                       ret_small, (unsigned)out2.encoded_bytes);
-                fflush(stdout);
-                ESP_LOGI(TAG, "OPUSCFG [%d %s] log system alive 2", i, v.name);
-            }
-        }
-        esp_opus_enc_close(enc);
-        printf("OPUSCFG [%d %s] closed\n", i, v.name);
-        fflush(stdout);
-        vTaskDelay(pdMS_TO_TICKS(20));
-    }
-    printf("OPUSCFG matrix done\n");
-    fflush(stdout);
-}
-
-static void OpusMatrixTaskEntry(void* arg) {
-    OpusConfigMatrixSelfTest();
-    s_opus_matrix_done = 1;
-    vTaskDelete(nullptr);
-}
-
 void AudioService::Initialize(AudioCodec* codec) {
     codec_ = codec;
     codec_->Start();
@@ -209,18 +78,6 @@ void AudioService::Initialize(AudioCodec* codec) {
                  size_ret, frame_bytes, encoder_frame_size_, encoder_outbuf_size_, info_ret,
                  (unsigned long)info.sample_rate, info.channel, info.bits_per_sample,
                  (unsigned long)info.bitrate);
-        /* Run the matrix in a dedicated 32 KB-stack task so the main task's
-         * 8 KB stack cannot be the corruption source, and block Initialize
-         * until it finished so nothing else interleaves with it. */
-        s_opus_matrix_done = 0;
-        if (xTaskCreate(OpusMatrixTaskEntry, "opus_diag", 32768, nullptr, 5, nullptr) ==
-            pdPASS) {
-            while (!s_opus_matrix_done) {
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
-        } else {
-            ESP_LOGE(TAG, "Failed to create the Opus matrix task");
-        }
     }
 
     if (codec->input_sample_rate() != 16000) {
@@ -313,14 +170,19 @@ void AudioService::Start() {
         "audio_output", 2048, this, 4, &audio_output_task_handle_);
 #endif
 
-    /* Start the opus codec task */
+    /* Start the opus codec task. The stack must fit libopus encode, which is
+     * far deeper than decode: at 24 KB (2048*12) real-audio frames failed with
+     * OPUS_INTERNAL_ERROR and the overflow smashed neighbouring heap objects
+     * (TLSF asserts, dead queue locks); an on-device self-test proved 32 KB
+     * encodes fine while 8 KB corrupted the console. 48 KB leaves headroom for
+     * the deepest SILK/CELT paths. */
     xTaskCreate(
         [](void* arg) {
             AudioService* audio_service = (AudioService*)arg;
             audio_service->OpusCodecTask();
             vTaskDelete(NULL);
         },
-        "opus_codec", 2048 * 12, this, 2, &opus_codec_task_handle_);
+        "opus_codec", 2048 * 24, this, 2, &opus_codec_task_handle_);
 }
 
 void AudioService::Stop() {
@@ -666,6 +528,14 @@ void AudioService::OpusCodecTask() {
                         }
                     }
                     debug_statistics_.encode_count++;
+                    /* Report the deepest stack usage occasionally so the
+                     * 48 KB budget can be trimmed (or re-grown) based on real
+                     * audio instead of guesses. High-water mark is in words. */
+                    if ((debug_statistics_.encode_count % 300) == 0) {
+                        UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
+                        ESP_LOGI(TAG, "Opus codec stack high-water mark: %u bytes",
+                                 (unsigned)(hwm * sizeof(StackType_t)));
+                    }
                 } else {
                     static uint32_t fail_logs = 0;
                     if (fail_logs < 8) {
@@ -675,14 +545,17 @@ void AudioService::OpusCodecTask() {
                             esp_opus_enc_get_frame_size(opus_encoder_, &live_in, &live_out);
                         esp_audio_enc_info_t info = {};
                         auto info_ret = esp_opus_enc_get_info(opus_encoder_, &info);
+                        UBaseType_t hwm = uxTaskGetStackHighWaterMark(nullptr);
                         ESP_LOGE(TAG,
                                  "Opus encode failed: ret=%d pcm=%u frame=%d in=%u out=%u "
-                                 "live=%d/%d/%d info=%d rate=%lu ch=%u bits=%u bitrate=%lu",
+                                 "live=%d/%d/%d info=%d rate=%lu ch=%u bits=%u bitrate=%lu "
+                                 "stack_free=%u bytes",
                                  ret, (unsigned)task.pcm.size(), encoder_frame_size_,
                                  (unsigned)in.len, (unsigned)out.len, live_ret, live_in,
                                  live_out, info_ret, (unsigned long)info.sample_rate,
                                  info.channel, info.bits_per_sample,
-                                 (unsigned long)info.bitrate);
+                                 (unsigned long)info.bitrate,
+                                 (unsigned)(hwm * sizeof(StackType_t)));
                         fail_logs++;
                     }
                     ESP_LOGE(TAG, "Failed to encode audio, error code: %d", ret);
