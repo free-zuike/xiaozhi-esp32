@@ -47,13 +47,13 @@
  * SPK_EN is the optional SD/EN/shutdown pin; it is driven high while playing.
  * Set SPK_SLOT_RIGHT to 1 if the amplifier takes the right I2S slot. */
 #ifndef PHONE_AV_HW_SPK_BCLK
-#define PHONE_AV_HW_SPK_BCLK GPIO_NUM_NC
+#define PHONE_AV_HW_SPK_BCLK GPIO_NUM_15
 #endif
 #ifndef PHONE_AV_HW_SPK_LRCK
-#define PHONE_AV_HW_SPK_LRCK GPIO_NUM_NC
+#define PHONE_AV_HW_SPK_LRCK GPIO_NUM_16
 #endif
 #ifndef PHONE_AV_HW_SPK_DIN
-#define PHONE_AV_HW_SPK_DIN GPIO_NUM_NC
+#define PHONE_AV_HW_SPK_DIN GPIO_NUM_7
 #endif
 #ifndef PHONE_AV_HW_SPK_EN
 #define PHONE_AV_HW_SPK_EN GPIO_NUM_NC
@@ -70,13 +70,13 @@
 #define PHONE_AV_HW_MIC_PDM 0
 #endif
 #ifndef PHONE_AV_HW_MIC_SCK
-#define PHONE_AV_HW_MIC_SCK GPIO_NUM_NC
+#define PHONE_AV_HW_MIC_SCK GPIO_NUM_17
 #endif
 #ifndef PHONE_AV_HW_MIC_WS
-#define PHONE_AV_HW_MIC_WS GPIO_NUM_NC
+#define PHONE_AV_HW_MIC_WS GPIO_NUM_18
 #endif
 #ifndef PHONE_AV_HW_MIC_DIN
-#define PHONE_AV_HW_MIC_DIN GPIO_NUM_NC
+#define PHONE_AV_HW_MIC_DIN GPIO_NUM_21
 #endif
 #ifndef PHONE_AV_HW_MIC_SLOT_RIGHT
 #define PHONE_AV_HW_MIC_SLOT_RIGHT 0
@@ -86,7 +86,7 @@
  * Only the pins used by the selected controller need to be valid; RST and BL
  * may stay GPIO_NUM_NC if they are tied in hardware. */
 #ifndef PHONE_AV_HW_DISP_TYPE
-#define PHONE_AV_HW_DISP_TYPE 0
+#define PHONE_AV_HW_DISP_TYPE 1
 #endif
 #ifndef PHONE_AV_HW_DISP_WIDTH
 #define PHONE_AV_HW_DISP_WIDTH 240
@@ -95,22 +95,22 @@
 #define PHONE_AV_HW_DISP_HEIGHT 240
 #endif
 #ifndef PHONE_AV_HW_DISP_MOSI
-#define PHONE_AV_HW_DISP_MOSI GPIO_NUM_NC
+#define PHONE_AV_HW_DISP_MOSI GPIO_NUM_12
 #endif
 #ifndef PHONE_AV_HW_DISP_CLK
-#define PHONE_AV_HW_DISP_CLK GPIO_NUM_NC
+#define PHONE_AV_HW_DISP_CLK GPIO_NUM_38
 #endif
 #ifndef PHONE_AV_HW_DISP_CS
-#define PHONE_AV_HW_DISP_CS GPIO_NUM_NC
+#define PHONE_AV_HW_DISP_CS GPIO_NUM_47
 #endif
 #ifndef PHONE_AV_HW_DISP_DC
-#define PHONE_AV_HW_DISP_DC GPIO_NUM_NC
+#define PHONE_AV_HW_DISP_DC GPIO_NUM_1
 #endif
 #ifndef PHONE_AV_HW_DISP_RST
-#define PHONE_AV_HW_DISP_RST GPIO_NUM_NC
+#define PHONE_AV_HW_DISP_RST GPIO_NUM_39
 #endif
 #ifndef PHONE_AV_HW_DISP_BL
-#define PHONE_AV_HW_DISP_BL GPIO_NUM_NC
+#define PHONE_AV_HW_DISP_BL GPIO_NUM_40
 #endif
 #ifndef PHONE_AV_HW_DISP_BL_ACTIVE_HIGH
 #define PHONE_AV_HW_DISP_BL_ACTIVE_HIGH 1
@@ -131,7 +131,7 @@
 #define PHONE_AV_HW_DISP_SWAP_XY 0
 #endif
 #ifndef PHONE_AV_HW_DISP_INVERT
-#define PHONE_AV_HW_DISP_INVERT 0
+#define PHONE_AV_HW_DISP_INVERT 1
 #endif
 /* 0 = RGB element order, 1 = BGR. */
 #ifndef PHONE_AV_HW_DISP_RGB_ORDER
@@ -153,6 +153,68 @@
 #endif
 #ifndef PHONE_AV_VOICE_PEAK_THRESHOLD
 #define PHONE_AV_VOICE_PEAK_THRESHOLD 4000
+#endif
+
+/* ---------------------------------------------------------------------------
+ * Tank car: TB6612FNG dual H-bridge
+ *
+ * PWMA/AIN1/AIN2 drive the left track, PWMB/BIN1/BIN2 the right track.
+ * STBY must be high for the driver to move; set PHONE_AV_TANK_STBY to
+ * GPIO_NUM_NC if you tied it to 3.3V. Set PHONE_AV_TANK_ENABLED to 0 to
+ * compile the controller out and not register the MCP tools.
+ * ------------------------------------------------------------------------- */
+#ifndef PHONE_AV_TANK_ENABLED
+#define PHONE_AV_TANK_ENABLED 1
+#endif
+#ifndef PHONE_AV_TANK_PWMA
+#define PHONE_AV_TANK_PWMA GPIO_NUM_4
+#endif
+#ifndef PHONE_AV_TANK_AIN1
+#define PHONE_AV_TANK_AIN1 GPIO_NUM_5
+#endif
+#ifndef PHONE_AV_TANK_AIN2
+#define PHONE_AV_TANK_AIN2 GPIO_NUM_6
+#endif
+#ifndef PHONE_AV_TANK_PWMB
+#define PHONE_AV_TANK_PWMB GPIO_NUM_8
+#endif
+#ifndef PHONE_AV_TANK_BIN1
+#define PHONE_AV_TANK_BIN1 GPIO_NUM_9
+#endif
+#ifndef PHONE_AV_TANK_BIN2
+#define PHONE_AV_TANK_BIN2 GPIO_NUM_10
+#endif
+#ifndef PHONE_AV_TANK_STBY
+#define PHONE_AV_TANK_STBY GPIO_NUM_11
+#endif
+#ifndef PHONE_AV_TANK_PWM_FREQ_HZ
+#define PHONE_AV_TANK_PWM_FREQ_HZ 20000
+#endif
+
+/* Optional I2C/sensor pins, exposed for future tools. The board does not
+ * initialize the bus yet. */
+#ifndef PHONE_AV_I2C_SDA
+#define PHONE_AV_I2C_SDA GPIO_NUM_13
+#endif
+#ifndef PHONE_AV_I2C_SCL
+#define PHONE_AV_I2C_SCL GPIO_NUM_14
+#endif
+/* Battery divider input (ADC1_CH1). Use e.g. 100k/100k for a 4.2 V cell. */
+#ifndef PHONE_AV_BATTERY_ADC
+#define PHONE_AV_BATTERY_ADC GPIO_NUM_2
+#endif
+
+/* Default capability sources when the NVS keys are missing. All three local
+ * peripherals are wired on this tank, so default to hardware; switch any of
+ * them back to the phone on the 8080 page. */
+#ifndef PHONE_AV_DEFAULT_SRC_SPK
+#define PHONE_AV_DEFAULT_SRC_SPK "hw"
+#endif
+#ifndef PHONE_AV_DEFAULT_SRC_MIC
+#define PHONE_AV_DEFAULT_SRC_MIC "hw"
+#endif
+#ifndef PHONE_AV_DEFAULT_SRC_DISP
+#define PHONE_AV_DEFAULT_SRC_DISP "hw"
 #endif
 
 #endif

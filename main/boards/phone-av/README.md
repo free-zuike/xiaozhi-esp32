@@ -57,18 +57,18 @@ NVS 命名空间 `phone_av`：
 
 ## 配置硬件
 
-所有引脚都在 `main/boards/phone-av/config.h` 里，默认是 `GPIO_NUM_NC`（未接）。
-填好引脚后重新编译，再到 8080 选择本地硬件。
+所有引脚都在 `main/boards/phone-av/config.h` 里。下面这套坦克的引脚已经填好；
+换硬件时改那里，重新编译后再到 8080 选择来源。
 
 ### 喇叭（I2S 功放）
 
 以 MAX98357A 为例：
 
 ```c
-#define PHONE_AV_HW_SPK_BCLK GPIO_NUM_4
-#define PHONE_AV_HW_SPK_LRCK GPIO_NUM_5
-#define PHONE_AV_HW_SPK_DIN  GPIO_NUM_6
-#define PHONE_AV_HW_SPK_EN   GPIO_NUM_7   // SD/EN，可选；不接则保持 GPIO_NUM_NC
+#define PHONE_AV_HW_SPK_BCLK GPIO_NUM_15
+#define PHONE_AV_HW_SPK_LRCK GPIO_NUM_16
+#define PHONE_AV_HW_SPK_DIN  GPIO_NUM_7
+#define PHONE_AV_HW_SPK_EN   GPIO_NUM_NC  // SD 接 3.3V，常开
 #define PHONE_AV_HW_SPK_SLOT_RIGHT 0      // 左 slot；右 slot 改成 1
 ```
 
@@ -85,9 +85,9 @@ INMP441（I2S）示例：
 
 ```c
 #define PHONE_AV_HW_MIC_PDM 0
-#define PHONE_AV_HW_MIC_SCK GPIO_NUM_15
-#define PHONE_AV_HW_MIC_WS  GPIO_NUM_16
-#define PHONE_AV_HW_MIC_DIN GPIO_NUM_17
+#define PHONE_AV_HW_MIC_SCK GPIO_NUM_17
+#define PHONE_AV_HW_MIC_WS  GPIO_NUM_18
+#define PHONE_AV_HW_MIC_DIN GPIO_NUM_21
 #define PHONE_AV_HW_MIC_SLOT_RIGHT 0
 ```
 
@@ -98,9 +98,9 @@ PDM 麦克风：
 
 ```c
 #define PHONE_AV_HW_MIC_PDM 1
-#define PHONE_AV_HW_MIC_SCK GPIO_NUM_15
-#define PHONE_AV_HW_MIC_DIN GPIO_NUM_16
-// 此时 PHONE_AV_HW_MIC_WS 不用填
+#define PHONE_AV_HW_MIC_SCK GPIO_NUM_17
+#define PHONE_AV_HW_MIC_DIN GPIO_NUM_21
+// 此时 PHONE_AV_HW_MIC_WS 不用填；本坦克用的是 INMP441，保持 PDM=0
 ```
 
 ### 屏幕（SPI LCD）
@@ -110,13 +110,13 @@ PDM 麦克风：
 ```c
 #define PHONE_AV_HW_DISP_TYPE   1
 #define PHONE_AV_HW_DISP_WIDTH  240
-#define PHONE_AV_HW_DISP_HEIGHT 240
-#define PHONE_AV_HW_DISP_MOSI   GPIO_NUM_11
-#define PHONE_AV_HW_DISP_CLK    GPIO_NUM_12
-#define PHONE_AV_HW_DISP_CS     GPIO_NUM_10
-#define PHONE_AV_HW_DISP_DC     GPIO_NUM_13
-#define PHONE_AV_HW_DISP_RST    GPIO_NUM_14   // 可 GPIO_NUM_NC
-#define PHONE_AV_HW_DISP_BL     GPIO_NUM_21   // 可 GPIO_NUM_NC
+#define PHONE_AV_HW_DISP_HEIGHT 240   // 2.0 寸 240x320 改成 320
+#define PHONE_AV_HW_DISP_MOSI   GPIO_NUM_12
+#define PHONE_AV_HW_DISP_CLK    GPIO_NUM_38
+#define PHONE_AV_HW_DISP_CS     GPIO_NUM_47
+#define PHONE_AV_HW_DISP_DC     GPIO_NUM_1
+#define PHONE_AV_HW_DISP_RST    GPIO_NUM_39   // 不用 GPIO 时接 3.3V，改 NC
+#define PHONE_AV_HW_DISP_BL     GPIO_NUM_40   // 不用调光时接 3.3V，改 NC
 ```
 
 如果屏幕颜色不对，调整：
@@ -133,6 +133,36 @@ SPI 使用 `SPI3_HOST`，默认 40 MHz；屏幕花屏时先把
 > 注意：`config.json` 默认设置了 `CONFIG_FLASH_NONE_ASSETS=y`。如果要让本地 LCD
 > 显示完整的表情/主题资源，需要把 assets 选项改回启用（或保留内置字体和占位
 > emoji）。8080 页面的虚拟屏不受影响，它直接读 assets 分区，没有资源时显示占位。
+
+### 坦克电机（TB6612FNG）
+
+```c
+#define PHONE_AV_TANK_ENABLED 1
+#define PHONE_AV_TANK_PWMA GPIO_NUM_4
+#define PHONE_AV_TANK_AIN1 GPIO_NUM_5
+#define PHONE_AV_TANK_AIN2 GPIO_NUM_6
+#define PHONE_AV_TANK_PWMB GPIO_NUM_8
+#define PHONE_AV_TANK_BIN1 GPIO_NUM_9
+#define PHONE_AV_TANK_BIN2 GPIO_NUM_10
+#define PHONE_AV_TANK_STBY GPIO_NUM_11   // 接 3.3V 时改成 GPIO_NUM_NC
+#define PHONE_AV_TANK_PWM_FREQ_HZ 20000
+```
+
+接线：
+
+- TB6612FNG `VCC` 接 3.3V，`VM` 接电池或 5V 升压（注意电机启动电流），`GND` 与 ESP32 共地。
+- `STBY` 拉高才输出；用 GPIO11 控制或直接接 3.3V。
+- 左电机 `AO1/AO2`，右电机 `BO1/BO2`；`PWMA/PWMB` 是调速。
+- 建议在 `VM` 与 `GND` 之间加 470–1000 µF 电解 + 100 nF，电机线远离麦克风和功放。
+
+MCP 工具（语音助手可调用）：
+
+- `self.tank.move`：`direction` = `forward/backward/left/right/stop`，`speed` 0–100，`duration_ms` 100–10000（到期自动停止）。
+- `self.tank.stop`：立即停止。
+- `self.tank.status`：返回当前方向和速度。
+
+`left/right` 是原地转向（一侧前进、另一侧后退）。电池检测 GPIO2 和 I2C 13/14
+目前只在 `config.h` 里预留，还没有对应的 MCP 工具。
 
 ## 混搭示例
 

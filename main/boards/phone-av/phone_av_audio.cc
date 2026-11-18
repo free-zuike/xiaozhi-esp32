@@ -671,8 +671,11 @@ PhoneAvAudioCodec::PhoneAvAudioCodec()
 PhoneAvAudioCodec::~PhoneAvAudioCodec() = default;
 
 PhoneAvSource PhoneAvAudioCodec::ReadSource(const char* key) {
+    const char* fallback =
+        std::strcmp(key, "src_mic") == 0 ? PHONE_AV_DEFAULT_SRC_MIC
+                                         : PHONE_AV_DEFAULT_SRC_SPK;
     Settings settings("phone_av", false);
-    return settings.GetString(key, "phone") == "hw" ? PhoneAvSource::kHardware
+    return settings.GetString(key, fallback) == "hw" ? PhoneAvSource::kHardware
                                                     : PhoneAvSource::kPhone;
 }
 

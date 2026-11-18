@@ -10,6 +10,7 @@
 #include "assets.h"
 #include "phone_av_audio.h"
 #include "phone_av_display.h"
+#include "tank_controller.h"
 #include "backlight.h"
 #include "display/lcd_display.h"
 #include <esp_timer.h>
@@ -140,9 +141,24 @@ PhoneAvSource PhoneAvParseSource(const std::string& value, PhoneAvSource fallbac
     return fallback;
 }
 
+const char* PhoneAvDefaultSource(const char* key) {
+    if (std::strcmp(key, kPhoneAvSrcSpkKey) == 0) {
+        return PHONE_AV_DEFAULT_SRC_SPK;
+    }
+    if (std::strcmp(key, kPhoneAvSrcMicKey) == 0) {
+        return PHONE_AV_DEFAULT_SRC_MIC;
+    }
+    if (std::strcmp(key, kPhoneAvSrcDispKey) == 0) {
+        return PHONE_AV_DEFAULT_SRC_DISP;
+    }
+    return "phone";
+}
+
 PhoneAvSource PhoneAvGetSource(const char* key) {
+    const char* fallback = PhoneAvDefaultSource(key);
     Settings settings(kPhoneAvConfigNs, false);
-    return PhoneAvParseSource(settings.GetString(key, "phone"), PhoneAvSource::kPhone);
+    return PhoneAvParseSource(settings.GetString(key, fallback),
+                              PhoneAvParseSource(fallback, PhoneAvSource::kPhone));
 }
 
 bool PhoneAvGetBool(const char* key, bool fallback) {
@@ -853,6 +869,8 @@ public:
             // cannot hear the assistant and answer itself. Barge-in is opt-in.
             codec->SetMuteMicDuringPlayback(!barge_in);
         }
+
+        tank_ = std::make_unique<TankController>();
     }
 
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) override {
@@ -935,6 +953,9 @@ public:
     bool VoiceRecentlyDetected() {
         auto* codec = AudioCodecPtr();
         return codec != nullptr && codec->VoiceDetectedRecently();
+    }
+    std::string TankStatusJson() {
+        return tank_ ? tank_->StatusJson() : std::string("{\"enabled\":false}");
     }
 
     virtual AudioCodec* GetAudioCodec() override {
@@ -1068,6 +1089,7 @@ private:
     Display* hw_display_ = nullptr;
     PwmBacklight* backlight_ = nullptr;
     std::unique_ptr<PhoneAvDisplayRouter> display_router_;
+    std::unique_ptr<TankController> tank_;
 };
 
 esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
@@ -1188,6 +1210,7 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         "  \"hw_spk_active\": " + (hw_spk_active ? "true" : "false") + ",\n" +
         "  \"hw_mic_active\": " + (hw_mic_active ? "true" : "false") + ",\n" +
         "  \"hw_disp_active\": " + (active_disp_hw ? "true" : "false") + ",\n" +
+        "  \"tank\": " + board->TankStatusJson() + ",\n" +
         "  \"auto_listen\": " + (auto_listen ? "true" : "false") + ",\n" +
         "  \"barge_in\": " + (barge_in ? "true" : "false") + ",\n" +
         "  \"voice_recent\": " + (voice_recent ? "true" : "false") + ",\n" +
