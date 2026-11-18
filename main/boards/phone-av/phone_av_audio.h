@@ -157,6 +157,8 @@ private:
     std::atomic<int32_t> raw_min_{0};
     std::atomic<int32_t> raw_max_{0};
     std::atomic<int32_t> raw_first_{0};
+    int32_t dc_prev_in_ = 0;
+    int32_t dc_prev_out_ = 0;
 };
 
 /* The codec handed to AudioService. It combines one microphone backend with

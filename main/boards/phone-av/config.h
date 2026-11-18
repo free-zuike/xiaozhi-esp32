@@ -87,6 +87,11 @@
 #ifndef PHONE_AV_HW_MIC_SHIFT
 #define PHONE_AV_HW_MIC_SHIFT 16
 #endif
+/* INMP441 raw speech measured around RMS 256 after the 24->16 bit shift.
+ * Apply a DC blocker and gain so the AFE/VAD sees a normal level. */
+#ifndef PHONE_AV_HW_MIC_GAIN
+#define PHONE_AV_HW_MIC_GAIN 8.0f
+#endif
 
 /* Screen: 0 = none, 1 = ST7789, 2 = ILI9341, 3 = GC9A01.
  * Only the pins used by the selected controller need to be valid; RST and BL

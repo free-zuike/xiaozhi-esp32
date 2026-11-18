@@ -675,7 +675,15 @@ int PhoneAvHwAudio::ReadLocked(int16_t* dest, int samples, float gain) {
         raw_first_.store(rx_buf_[0]);
     }
     for (int i = 0; i < n; ++i) {
-        int32_t value = rx_buf_[i] >> PHONE_AV_HW_MIC_SHIFT;
+        int32_t raw = rx_buf_[i] >> PHONE_AV_HW_MIC_SHIFT;
+        // First-order DC blocker (~16 Hz at 16 kHz), then gain. The INMP441
+        // module on this build has a noticeable DC offset; without this the
+        // AFE sees a constant offset and a very low speech level.
+        int32_t blocked = raw - dc_prev_in_ +
+                          static_cast<int32_t>((static_cast<int64_t>(dc_prev_out_) * 255) / 256);
+        dc_prev_in_ = raw;
+        dc_prev_out_ = blocked;
+        int32_t value = static_cast<int32_t>(blocked * PHONE_AV_HW_MIC_GAIN);
         if (gain > 0.0f) {
             value = static_cast<int32_t>(value * gain);
         }
