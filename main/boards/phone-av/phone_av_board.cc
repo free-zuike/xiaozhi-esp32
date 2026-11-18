@@ -418,6 +418,8 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "    t+='自动对话: '+(j.auto_listen?'开':'关')+'  播放开麦: '+"
         "      (j.barge_in?'开':'关')+'  语音: '+(j.voice_recent?'刚检测到':'无')+'\\n';"
         "    t+='麦克风: RMS='+j.mic_rms+' peak='+j.mic_peak+'\\n';"
+        "    t+='聆听: RMS='+j.mic_read_rms+' peak='+j.mic_read_peak+"
+        "      ' raw='+j.mic_raw_min+'..'+j.mic_raw_max+'\\n';"
         "    t+='状态: '+(j.screen_status||'')+'\\n';"
         "    t+='表情: '+(j.screen_emotion||'')+'  主题: '+(j.screen_theme||'')+'\\n';"
         "    t+='资源分区: '+(j.assets_valid?'有效':'未就绪')+'\\n';"
@@ -1014,6 +1016,26 @@ public:
         auto* codec = AudioCodecPtr();
         return codec != nullptr ? codec->ProbePeak() : 0;
     }
+    int MicReadRms() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->ReadRms() : 0;
+    }
+    int MicReadPeak() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->ReadPeak() : 0;
+    }
+    int32_t MicRawMin() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->RawMin() : 0;
+    }
+    int32_t MicRawMax() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->RawMax() : 0;
+    }
+    int32_t MicRawFirst() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->RawFirst() : 0;
+    }
     std::string TankStatusJson() {
         return tank_ ? tank_->StatusJson() : std::string("{\"enabled\":false}");
     }
@@ -1198,6 +1220,11 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
     const bool voice_recent = board->VoiceRecentlyDetected();
     const int mic_rms = board->MicProbeRms();
     const int mic_peak = board->MicProbePeak();
+    const int mic_read_rms = board->MicReadRms();
+    const int mic_read_peak = board->MicReadPeak();
+    const int32_t mic_raw_min = board->MicRawMin();
+    const int32_t mic_raw_max = board->MicRawMax();
+    const int32_t mic_raw_first = board->MicRawFirst();
 
     const char* rr = "unknown";
     switch (esp_reset_reason()) {
@@ -1278,6 +1305,11 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         "  \"voice_recent\": " + (voice_recent ? "true" : "false") + ",\n" +
         "  \"mic_rms\": " + std::to_string(mic_rms) + ",\n" +
         "  \"mic_peak\": " + std::to_string(mic_peak) + ",\n" +
+        "  \"mic_read_rms\": " + std::to_string(mic_read_rms) + ",\n" +
+        "  \"mic_read_peak\": " + std::to_string(mic_read_peak) + ",\n" +
+        "  \"mic_raw_min\": " + std::to_string(mic_raw_min) + ",\n" +
+        "  \"mic_raw_max\": " + std::to_string(mic_raw_max) + ",\n" +
+        "  \"mic_raw_first\": " + std::to_string(mic_raw_first) + ",\n" +
         "  \"voice_detected\": " + (voice ? "true" : "false") + ",\n" +
         "  \"phone_mic_connected\": " + (mic ? "true" : "false") + ",\n" +
         "  \"network_ready\": " + (net ? "true" : "false") + ",\n" +

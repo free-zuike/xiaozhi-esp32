@@ -659,6 +659,21 @@ int PhoneAvHwAudio::ReadLocked(int16_t* dest, int samples, float gain) {
         return 0;
     }
     int n = static_cast<int>(bytes_read / sizeof(int32_t));
+    if (n > 0) {
+        int32_t minimum = INT32_MAX;
+        int32_t maximum = INT32_MIN;
+        for (int i = 0; i < n; ++i) {
+            if (rx_buf_[i] < minimum) {
+                minimum = rx_buf_[i];
+            }
+            if (rx_buf_[i] > maximum) {
+                maximum = rx_buf_[i];
+            }
+        }
+        raw_min_.store(minimum);
+        raw_max_.store(maximum);
+        raw_first_.store(rx_buf_[0]);
+    }
     for (int i = 0; i < n; ++i) {
         int32_t value = rx_buf_[i] >> PHONE_AV_HW_MIC_SHIFT;
         if (gain > 0.0f) {
@@ -820,6 +835,21 @@ int PhoneAvAudioCodec::Read(int16_t* dest, int samples) {
         phone_mic_->Pop(mic_frames_.data(), static_cast<std::size_t>(frames));
     } else if (active_mic_ == PhoneAvSource::kHardware && hw_) {
         hw_->Read(mic_frames_.data(), frames, input_gain_);
+    }
+
+    {
+        int64_t read_energy = 0;
+        int read_peak = 0;
+        for (int f = 0; f < frames; ++f) {
+            const int32_t value = mic_frames_[f];
+            read_energy += static_cast<int64_t>(value) * value;
+            const int32_t absolute = value < 0 ? -value : value;
+            if (absolute > read_peak) {
+                read_peak = absolute;
+            }
+        }
+        read_rms_.store(static_cast<int>(std::sqrt(static_cast<double>(read_energy) / frames)));
+        read_peak_.store(read_peak);
     }
 
     const TickType_t now = xTaskGetTickCount();

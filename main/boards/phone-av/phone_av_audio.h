@@ -139,6 +139,9 @@ public:
     /* Enable RX for one short read, then restore the previous state. Used by
      * the idle auto-listen voice probe, when AudioService is not reading. */
     int ProbeMic(int16_t* dest, int samples);
+    int32_t RawMin() const { return raw_min_.load(); }
+    int32_t RawMax() const { return raw_max_.load(); }
+    int32_t RawFirst() const { return raw_first_.load(); }
 
 private:
     int ReadLocked(int16_t* dest, int samples, float gain);
@@ -151,6 +154,9 @@ private:
     std::vector<int32_t> rx_buf_;
     std::mutex tx_mutex_;
     std::mutex rx_mutex_;
+    std::atomic<int32_t> raw_min_{0};
+    std::atomic<int32_t> raw_max_{0};
+    std::atomic<int32_t> raw_first_{0};
 };
 
 /* The codec handed to AudioService. It combines one microphone backend with
@@ -180,6 +186,11 @@ public:
     bool ProbeVoiceActivity();
     int ProbeRms() const { return probe_rms_.load(); }
     int ProbePeak() const { return probe_peak_.load(); }
+    int ReadRms() const { return read_rms_.load(); }
+    int ReadPeak() const { return read_peak_.load(); }
+    int32_t RawMin() const { return hw_ ? hw_->RawMin() : 0; }
+    int32_t RawMax() const { return hw_ ? hw_->RawMax() : 0; }
+    int32_t RawFirst() const { return hw_ ? hw_->RawFirst() : 0; }
     /* True while the last playback is still recent (echo guard window). */
     bool IsPlaybackActive() const;
     /* When true the microphone is muted while playback is active (and for a
@@ -238,6 +249,8 @@ private:
     std::atomic<TickType_t> last_voice_tick_{0};
     std::atomic<int> probe_rms_{0};
     std::atomic<int> probe_peak_{0};
+    std::atomic<int> read_rms_{0};
+    std::atomic<int> read_peak_{0};
 };
 
 #endif  // _PHONE_AV_AUDIO_H_
