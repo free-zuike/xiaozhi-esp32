@@ -66,8 +66,34 @@ void AudioService::Initialize(AudioCodec* codec) {
     } else {
         encoder_sample_rate_ = 16000;
         encoder_duration_ms_ = OPUS_FRAME_DURATION_MS;
-        esp_opus_enc_get_frame_size(opus_encoder_, &encoder_frame_size_, &encoder_outbuf_size_);
+        auto size_ret =
+            esp_opus_enc_get_frame_size(opus_encoder_, &encoder_frame_size_, &encoder_outbuf_size_);
+        int frame_bytes = encoder_frame_size_;
         encoder_frame_size_ = encoder_frame_size_ / sizeof(int16_t);
+        esp_audio_enc_info_t info = {};
+        auto info_ret = esp_opus_enc_get_info(opus_encoder_, &info);
+        ESP_LOGI(TAG,
+                 "Opus encoder: get_frame_size=%d frame=%d bytes (%d samples) out=%d bytes "
+                 "get_info=%d rate=%lu ch=%u bits=%u bitrate=%lu",
+                 size_ret, frame_bytes, encoder_frame_size_, encoder_outbuf_size_, info_ret,
+                 (unsigned long)info.sample_rate, info.channel, info.bits_per_sample,
+                 (unsigned long)info.bitrate);
+        if (encoder_frame_size_ > 0 && encoder_outbuf_size_ > 0) {
+            std::vector<int16_t> silence(encoder_frame_size_, 0);
+            std::vector<uint8_t> encoded(encoder_outbuf_size_);
+            esp_audio_enc_in_frame_t test_in = {
+                .buffer = reinterpret_cast<uint8_t*>(silence.data()),
+                .len = (uint32_t)(silence.size() * sizeof(int16_t)),
+            };
+            esp_audio_enc_out_frame_t test_out = {
+                .buffer = encoded.data(),
+                .len = (uint32_t)encoded.size(),
+                .encoded_bytes = 0,
+            };
+            auto test_ret = esp_opus_enc_process(opus_encoder_, &test_in, &test_out);
+            ESP_LOGI(TAG, "Opus self-test: ret=%d encoded=%u", test_ret,
+                     (unsigned)test_out.encoded_bytes);
+        }
     }
 
     if (codec->input_sample_rate() != 16000) {
@@ -514,6 +540,24 @@ void AudioService::OpusCodecTask() {
                     }
                     debug_statistics_.encode_count++;
                 } else {
+                    static uint32_t fail_logs = 0;
+                    if (fail_logs < 8) {
+                        int live_in = 0;
+                        int live_out = 0;
+                        auto live_ret =
+                            esp_opus_enc_get_frame_size(opus_encoder_, &live_in, &live_out);
+                        esp_audio_enc_info_t info = {};
+                        auto info_ret = esp_opus_enc_get_info(opus_encoder_, &info);
+                        ESP_LOGE(TAG,
+                                 "Opus encode failed: ret=%d pcm=%u frame=%d in=%u out=%u "
+                                 "live=%d/%d/%d info=%d rate=%lu ch=%u bits=%u bitrate=%lu",
+                                 ret, (unsigned)task.pcm.size(), encoder_frame_size_,
+                                 (unsigned)in.len, (unsigned)out.len, live_ret, live_in,
+                                 live_out, info_ret, (unsigned long)info.sample_rate,
+                                 info.channel, info.bits_per_sample,
+                                 (unsigned long)info.bitrate);
+                        fail_logs++;
+                    }
                     ESP_LOGE(TAG, "Failed to encode audio, error code: %d", ret);
                 }
             } else {
