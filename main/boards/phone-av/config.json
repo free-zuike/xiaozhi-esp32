@@ -8,7 +8,9 @@
                 "CONFIG_FLASH_DEFAULT_ASSETS=n",
                 "CONFIG_FLASH_CUSTOM_ASSETS=n",
                 "CONFIG_FLASH_EXPRESSION_ASSETS=n",
-                "CONFIG_FLASH_NONE_ASSETS=y"
+                "CONFIG_FLASH_NONE_ASSETS=y",
+                "CONFIG_MQTT_USE_CUSTOM_CONFIG=y",
+                "CONFIG_MQTT_TASK_STACK_SIZE=10240"
             ]
         }
     ]

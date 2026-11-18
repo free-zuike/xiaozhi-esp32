@@ -656,7 +656,6 @@ int PhoneAvHwAudio::ReadLocked(int16_t* dest, int samples, float gain) {
                                      static_cast<size_t>(samples) * sizeof(int32_t),
                                      &bytes_read, pdMS_TO_TICKS(200));
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "I2S RX read failed: %s", esp_err_to_name(err));
         return 0;
     }
     int n = static_cast<int>(bytes_read / sizeof(int32_t));
