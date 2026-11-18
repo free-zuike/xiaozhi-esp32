@@ -11,6 +11,7 @@
 #include "phone_av_audio.h"
 #include "phone_av_display.h"
 #include "tank_controller.h"
+#include "pin_map_check.h"
 #include "backlight.h"
 #include "display/lcd_display.h"
 #include <esp_timer.h>
