@@ -887,6 +887,10 @@ public:
                     // silence made the assistant talk to itself at night.
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
                         auto* codec = static_cast<PhoneAvAudioCodec*>(board->GetAudioCodec());
+                        ESP_LOGI(TAG, "auto-listen probe: mic=%d playback=%d state=%d",
+                                 codec != nullptr && codec->IsMicAvailable(),
+                                 codec != nullptr && codec->IsPlaybackActive(),
+                                 static_cast<int>(Application::GetInstance().GetDeviceState()));
                         if (codec != nullptr && codec->IsMicAvailable() &&
                             !codec->IsPlaybackActive()) {
                             // AudioService does not read the codec while idle, so
