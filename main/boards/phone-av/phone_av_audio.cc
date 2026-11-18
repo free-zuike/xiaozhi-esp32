@@ -660,7 +660,7 @@ int PhoneAvHwAudio::ReadLocked(int16_t* dest, int samples, float gain) {
     }
     int n = static_cast<int>(bytes_read / sizeof(int32_t));
     for (int i = 0; i < n; ++i) {
-        int32_t value = rx_buf_[i] >> 12;
+        int32_t value = rx_buf_[i] >> PHONE_AV_HW_MIC_SHIFT;
         if (gain > 0.0f) {
             value = static_cast<int32_t>(value * gain);
         }

@@ -81,6 +81,12 @@
 #ifndef PHONE_AV_HW_MIC_SLOT_RIGHT
 #define PHONE_AV_HW_MIC_SLOT_RIGHT 0
 #endif
+/* I2S mic samples arrive as 24-bit data in a 32-bit slot. INMP441 is left
+ * justified, so >>16 converts to 16-bit without clipping; a 32-bit mic that
+ * really uses the low bits would need a smaller shift. */
+#ifndef PHONE_AV_HW_MIC_SHIFT
+#define PHONE_AV_HW_MIC_SHIFT 16
+#endif
 
 /* Screen: 0 = none, 1 = ST7789, 2 = ILI9341, 3 = GC9A01.
  * Only the pins used by the selected controller need to be valid; RST and BL
