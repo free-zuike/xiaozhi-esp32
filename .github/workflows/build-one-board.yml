@@ -31,7 +31,7 @@ jobs:
     name: Build ${{ inputs.board || 'phone-av' }}
     runs-on: ubuntu-latest
     container:
-      image: espressif/idf:v6.1
+      image: espressif/idf:v6.1.1
     steps:
       - uses: actions/checkout@v7
 

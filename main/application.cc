@@ -1,5 +1,4 @@
 #include "application.h"
-#include "sdkconfig.h"
 #include "assets.h"
 #include "assets/lang_config.h"
 #include "audio_codec.h"
@@ -441,14 +440,6 @@ void Application::CheckAssetsVersion() {
 }
 
 void Application::CheckNewVersion() {
-#ifdef CONFIG_BOARD_TYPE_PHONE_AV
-    // This board's OTA endpoint can fail its TLS handshake, and the mbedTLS
-    // session cleanup then asserts with "free() target pointer is outside
-    // heap areas", rebooting the board. Firmware updates on this board are
-    // applied over USB, so skip the boot-time version check.
-    ESP_LOGW(TAG, "phone-av: boot-time OTA check disabled");
-    return;
-#endif
     const int MAX_RETRY = 10;
     int retry_count = 0;
     int retry_delay = 10;  // Initial retry delay in seconds

@@ -8,8 +8,7 @@
                 "CONFIG_FLASH_DEFAULT_ASSETS=n",
                 "CONFIG_FLASH_CUSTOM_ASSETS=n",
                 "CONFIG_FLASH_EXPRESSION_ASSETS=n",
-                "CONFIG_FLASH_NONE_ASSETS=y",
-                "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=n"
+                "CONFIG_FLASH_NONE_ASSETS=y"
             ]
         }
     ]
