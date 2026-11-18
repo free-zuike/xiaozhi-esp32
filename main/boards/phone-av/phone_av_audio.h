@@ -44,6 +44,7 @@ public:
 
     void Push(const int16_t* data, std::size_t samples);
     std::size_t Pop(int16_t* dest, std::size_t samples);
+    std::size_t PeekLatest(int16_t* dest, std::size_t samples) const;
     std::size_t Available() const;
 
 private:
@@ -66,6 +67,9 @@ public:
     uint32_t ConnectCount() const { return connect_count_.load(); }
     uint32_t DisconnectCount() const { return disconnect_count_.load(); }
     std::size_t Pop(int16_t* dest, std::size_t samples) { return buffer_.Pop(dest, samples); }
+    std::size_t PeekLatest(int16_t* dest, std::size_t samples) const {
+        return buffer_.PeekLatest(dest, samples);
+    }
 
 private:
     static void TaskEntry(void* arg);
@@ -131,8 +135,12 @@ public:
 
     int Write(const int16_t* data, int samples, int volume);
     int Read(int16_t* dest, int samples, float gain);
+    /* Enable RX for one short read, then restore the previous state. Used by
+     * the idle auto-listen voice probe, when AudioService is not reading. */
+    int ProbeMic(int16_t* dest, int samples);
 
 private:
+    int ReadLocked(int16_t* dest, int samples, float gain);
     i2s_chan_handle_t tx_ = nullptr;
     i2s_chan_handle_t rx_ = nullptr;
     bool tx_enabled_ = false;
@@ -165,6 +173,12 @@ public:
 
     /* Auto-listen gating: true when speech-like energy arrived recently. */
     bool VoiceDetectedRecently() const;
+    /* Idle probe: read the latest mic samples directly. AudioService does not
+     * read the codec while idle, so VoiceDetectedRecently() alone would never
+     * arm. Returns true when this probe saw speech-like energy. */
+    bool ProbeVoiceActivity();
+    int ProbeRms() const { return probe_rms_.load(); }
+    int ProbePeak() const { return probe_peak_.load(); }
     /* True while the last playback is still recent (echo guard window). */
     bool IsPlaybackActive() const;
     /* When true the microphone is muted while playback is active (and for a
@@ -188,6 +202,7 @@ protected:
 private:
     static constexpr std::size_t kRefBufferSamples = 16000;  // 1 s @ 16 kHz
     static constexpr std::size_t kMicFrameBufferSamples = 2048;
+    static constexpr std::size_t kProbeSamples = 960;  // 60 ms @ 16 kHz
     // Playback is "recent" for this long after the last Write(); it covers the
     // 600 ms phone POST batch, HTTP/phone latency and the TTS tail. The mic is
     // muted during this window by default, and the auto-listen voice detector
@@ -214,11 +229,14 @@ private:
     PcmRingBuffer ref_buffer_;
     std::vector<int16_t> ref_frames_;
     std::vector<int16_t> mic_frames_;
+    std::vector<int16_t> probe_frames_;
     TickType_t last_read_tick_ = 0;
     std::atomic<bool> started_{false};
     std::atomic<bool> mute_mic_during_playback_{true};
     std::atomic<TickType_t> last_output_tick_{0};
     std::atomic<TickType_t> last_voice_tick_{0};
+    std::atomic<int> probe_rms_{0};
+    std::atomic<int> probe_peak_{0};
 };
 
 #endif  // _PHONE_AV_AUDIO_H_

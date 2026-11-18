@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -339,7 +340,8 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "<div>播放时开麦：" + barge_controls + "</div>"
         "</div>"
         "<p class=\"hint\">默认关闭自动对话和播放时开麦：不会在没人时自己开聊，也不会听到自己的 TTS 后自问自答。开启“播放时开麦”才能打断，但可能出现自问自答。</p>"
-        "<button type=\"submit\">保存并重启</button></form>";
+        "<button type=\"submit\">保存并重启</button></form>"
+        "<p><a href=\"/test_speaker\" target=\"_blank\">测试喇叭（1kHz 2 秒）</a></p>";
     if (!message.empty()) {
         html += "<p><b>" + message + "</b></p>";
     }
@@ -415,6 +417,7 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "          ' 屏幕='+srcName(j.active_disp)+'\\n';"
         "    t+='自动对话: '+(j.auto_listen?'开':'关')+'  播放开麦: '+"
         "      (j.barge_in?'开':'关')+'  语音: '+(j.voice_recent?'刚检测到':'无')+'\\n';"
+        "    t+='麦克风: RMS='+j.mic_rms+' peak='+j.mic_peak+'\\n';"
         "    t+='状态: '+(j.screen_status||'')+'\\n';"
         "    t+='表情: '+(j.screen_emotion||'')+'  主题: '+(j.screen_theme||'')+'\\n';"
         "    t+='资源分区: '+(j.assets_valid?'有效':'未就绪')+'\\n';"
@@ -583,6 +586,39 @@ esp_err_t PhoneAvAssetsHandler(httpd_req_t* req) {
     return httpd_resp_send(req, static_cast<const char*>(data), static_cast<ssize_t>(size));
 }
 
+void PhoneAvSpeakerTestTask(void* arg) {
+    auto* codec = static_cast<AudioCodec*>(arg);
+    constexpr int kSampleRate = 16000;
+    constexpr int kChunk = 960;   // 60 ms
+    constexpr int kChunks = 34;   // ~2 s
+    codec->EnableOutput(true);
+    std::vector<int16_t> samples(kChunk);
+    for (int c = 0; c < kChunks; ++c) {
+        for (int i = 0; i < kChunk; ++i) {
+            const double t = (c * kChunk + i) / static_cast<double>(kSampleRate);
+            samples[i] = static_cast<int16_t>(
+                6000.0 * std::sin(2.0 * 3.14159265358979323846 * 1000.0 * t));
+        }
+        codec->OutputData(samples);
+    }
+    codec->EnableOutput(false);
+    vTaskDelete(nullptr);
+}
+
+esp_err_t PhoneAvTestSpeakerHandler(httpd_req_t* req) {
+    auto* codec = Board::GetInstance().GetAudioCodec();
+    if (codec == nullptr) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "no codec");
+        return ESP_FAIL;
+    }
+    if (xTaskCreate(PhoneAvSpeakerTestTask, "spk_test", 4096, codec, 5, nullptr) != pdPASS) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "task failed");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    return httpd_resp_send(req, "playing 1kHz for 2s", HTTPD_RESP_USE_STRLEN);
+}
+
 void StartPhoneAvConfigServer() {
     static std::atomic<bool> started{false};
     if (started.exchange(true)) {
@@ -595,6 +631,10 @@ void StartPhoneAvConfigServer() {
     // and the board reboots in a loop right after connecting to WiFi.
     config.stack_size = 16 * 1024;
     config.max_uri_handlers = 8;
+    // The WiFi config-AP server uses the httpd default ctrl_port (32768).
+    // Give this second httpd instance its own control port so the 8080 page
+    // also works while the captive portal is active.
+    config.ctrl_port = 32770;
     httpd_handle_t server = nullptr;
     if (httpd_start(&server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start phone-av config server");
@@ -628,6 +668,11 @@ void StartPhoneAvConfigServer() {
         .handler = PhoneAvAssetsHandler, .user_ctx = nullptr,
     };
     httpd_register_uri_handler(server, &assets_uri);
+    httpd_uri_t test_uri = {
+        .uri = "/test_speaker", .method = HTTP_GET,
+        .handler = PhoneAvTestSpeakerHandler, .user_ctx = nullptr,
+    };
+    httpd_register_uri_handler(server, &test_uri);
 
     esp_netif_t* netif = esp_netif_get_default_netif();
     esp_netif_ip_info_t info{};
@@ -841,13 +886,19 @@ public:
                     if (Application::GetInstance().GetDeviceState() == kDeviceStateIdle) {
                         auto* codec = static_cast<PhoneAvAudioCodec*>(board->GetAudioCodec());
                         if (codec != nullptr && codec->IsMicAvailable() &&
-                            !codec->IsPlaybackActive() && codec->VoiceDetectedRecently()) {
-                            // Let HandleToggleChatEvent() open the audio channel through
-                            // the standard Connecting state. Do NOT call
-                            // SetListeningMode() here: it would jump straight to
-                            // Listening without a hello/session_id/UDP handshake,
-                            // and the toggle would then close the channel at once.
-                            Application::GetInstance().ToggleChatState();
+                            !codec->IsPlaybackActive()) {
+                            // AudioService does not read the codec while idle, so
+                            // VoiceDetectedRecently() would never arm by itself.
+                            // Probe the latest mic samples here, then open the chat.
+                            codec->ProbeVoiceActivity();
+                            if (codec->VoiceDetectedRecently()) {
+                                // Let HandleToggleChatEvent() open the audio channel through
+                                // the standard Connecting state. Do NOT call
+                                // SetListeningMode() here: it would jump straight to
+                                // Listening without a hello/session_id/UDP handshake,
+                                // and the toggle would then close the channel at once.
+                                Application::GetInstance().ToggleChatState();
+                            }
                         }
                     }
                 },
@@ -954,6 +1005,14 @@ public:
     bool VoiceRecentlyDetected() {
         auto* codec = AudioCodecPtr();
         return codec != nullptr && codec->VoiceDetectedRecently();
+    }
+    int MicProbeRms() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->ProbeRms() : 0;
+    }
+    int MicProbePeak() {
+        auto* codec = AudioCodecPtr();
+        return codec != nullptr ? codec->ProbePeak() : 0;
     }
     std::string TankStatusJson() {
         return tank_ ? tank_->StatusJson() : std::string("{\"enabled\":false}");
@@ -1137,6 +1196,8 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
     const bool auto_listen = board->AutoListenEnabled();
     const bool barge_in = board->BargeInEnabled();
     const bool voice_recent = board->VoiceRecentlyDetected();
+    const int mic_rms = board->MicProbeRms();
+    const int mic_peak = board->MicProbePeak();
 
     const char* rr = "unknown";
     switch (esp_reset_reason()) {
@@ -1215,6 +1276,8 @@ esp_err_t PhoneAvStatusHandler(httpd_req_t* req) {
         "  \"auto_listen\": " + (auto_listen ? "true" : "false") + ",\n" +
         "  \"barge_in\": " + (barge_in ? "true" : "false") + ",\n" +
         "  \"voice_recent\": " + (voice_recent ? "true" : "false") + ",\n" +
+        "  \"mic_rms\": " + std::to_string(mic_rms) + ",\n" +
+        "  \"mic_peak\": " + std::to_string(mic_peak) + ",\n" +
         "  \"voice_detected\": " + (voice ? "true" : "false") + ",\n" +
         "  \"phone_mic_connected\": " + (mic ? "true" : "false") + ",\n" +
         "  \"network_ready\": " + (net ? "true" : "false") + ",\n" +

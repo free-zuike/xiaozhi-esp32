@@ -70,6 +70,19 @@ std::size_t PcmRingBuffer::Pop(int16_t* dest, std::size_t samples) {
     return count;
 }
 
+std::size_t PcmRingBuffer::PeekLatest(int16_t* dest, std::size_t samples) const {
+    if (dest == nullptr || samples == 0) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t count = std::min(samples, count_);
+    const std::size_t start = (write_pos_ + capacity_ - count) % capacity_;
+    for (std::size_t i = 0; i < count; ++i) {
+        dest[i] = buffer_[(start + i) % capacity_];
+    }
+    return count;
+}
+
 std::size_t PcmRingBuffer::Available() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return count_;
@@ -575,6 +588,10 @@ int PhoneAvHwAudio::Read(int16_t* dest, int samples, float gain) {
     if (rx_ == nullptr || !rx_enabled_ || dest == nullptr || samples <= 0) {
         return 0;
     }
+    return ReadLocked(dest, samples, gain);
+}
+
+int PhoneAvHwAudio::ReadLocked(int16_t* dest, int samples, float gain) {
     size_t bytes_read = 0;
     if (pdm_mic_) {
         esp_err_t err = i2s_channel_read(rx_, dest, static_cast<size_t>(samples) * sizeof(int16_t),
@@ -613,10 +630,31 @@ int PhoneAvHwAudio::Read(int16_t* dest, int samples, float gain) {
     return n;
 }
 
+int PhoneAvHwAudio::ProbeMic(int16_t* dest, int samples) {
+    std::lock_guard<std::mutex> lock(rx_mutex_);
+    if (rx_ == nullptr || dest == nullptr || samples <= 0) {
+        return 0;
+    }
+    const bool was_enabled = rx_enabled_;
+    if (!was_enabled) {
+        if (i2s_channel_enable(rx_) != ESP_OK) {
+            return 0;
+        }
+        rx_enabled_ = true;
+    }
+    const int n = ReadLocked(dest, samples, 0.0f);
+    if (!was_enabled) {
+        i2s_channel_disable(rx_);
+        rx_enabled_ = false;
+    }
+    return n;
+}
+
 PhoneAvAudioCodec::PhoneAvAudioCodec()
     : ref_buffer_(kRefBufferSamples),
       ref_frames_(kMicFrameBufferSamples),
-      mic_frames_(kMicFrameBufferSamples) {
+      mic_frames_(kMicFrameBufferSamples),
+      probe_frames_(kProbeSamples) {
     duplex_ = true;
     input_reference_ = true;
     input_channels_ = 2;
@@ -828,6 +866,44 @@ bool PhoneAvAudioCodec::VoiceDetectedRecently() const {
         return false;
     }
     return (xTaskGetTickCount() - last) <= pdMS_TO_TICKS(kVoiceHoldMs);
+}
+
+bool PhoneAvAudioCodec::ProbeVoiceActivity() {
+    const TickType_t now = xTaskGetTickCount();
+    const TickType_t last_out = last_output_tick_.load();
+    if (last_out != 0 && (now - last_out) <= pdMS_TO_TICKS(kPlaybackGuardMs)) {
+        return false;
+    }
+
+    std::size_t got = 0;
+    if (active_mic_ == PhoneAvSource::kPhone && phone_mic_) {
+        got = phone_mic_->PeekLatest(probe_frames_.data(), kProbeSamples);
+    } else if (active_mic_ == PhoneAvSource::kHardware && hw_) {
+        const int n = hw_->ProbeMic(probe_frames_.data(), static_cast<int>(kProbeSamples));
+        got = n > 0 ? static_cast<std::size_t>(n) : 0;
+    }
+    if (got == 0) {
+        return false;
+    }
+
+    int64_t energy = 0;
+    int peak = 0;
+    for (std::size_t i = 0; i < got; ++i) {
+        const int32_t value = probe_frames_[i];
+        energy += static_cast<int64_t>(value) * value;
+        const int32_t absolute = value < 0 ? -value : value;
+        if (absolute > peak) {
+            peak = absolute;
+        }
+    }
+    const int rms = static_cast<int>(std::sqrt(static_cast<double>(energy) / got));
+    probe_rms_.store(rms);
+    probe_peak_.store(peak);
+    if (rms >= PHONE_AV_VOICE_RMS_THRESHOLD || peak >= PHONE_AV_VOICE_PEAK_THRESHOLD) {
+        last_voice_tick_.store(now);
+        return true;
+    }
+    return false;
 }
 
 bool PhoneAvAudioCodec::IsPhoneMicConnected() const {
