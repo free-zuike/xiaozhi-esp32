@@ -152,7 +152,11 @@
 #define PHONE_AV_HW_DISP_SPI_MODE 0
 #endif
 #ifndef PHONE_AV_HW_DISP_PCLK_HZ
-#define PHONE_AV_HW_DISP_PCLK_HZ (40 * 1000 * 1000)
+/* 10 MHz is deliberately conservative: ST7789 modules work at 40 MHz on short
+ * PCB traces, but the phone-av board is usually wired with dupont leads where
+ * 40 MHz can corrupt the panel init/stream and leave the screen black. Raise
+ * this only after the wiring is known-good. */
+#define PHONE_AV_HW_DISP_PCLK_HZ (10 * 1000 * 1000)
 #endif
 
 /* Auto-listen voice gate. When "自动对话" is enabled on the 8080 page, the
