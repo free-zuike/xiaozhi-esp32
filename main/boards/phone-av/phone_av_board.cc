@@ -36,6 +36,7 @@
 #include <vector>
 
 #include <driver/spi_common.h>
+#include <esp_heap_caps.h>
 #include <esp_http_server.h>
 #include <esp_lcd_panel_io.h>
 #include <esp_lcd_panel_ops.h>
@@ -1147,6 +1148,39 @@ private:
         esp_lcd_panel_invert_color(panel, PHONE_AV_HW_DISP_INVERT);
         esp_lcd_panel_swap_xy(panel, PHONE_AV_HW_DISP_SWAP_XY);
         esp_lcd_panel_mirror(panel, PHONE_AV_HW_DISP_MIRROR_X, PHONE_AV_HW_DISP_MIRROR_Y);
+
+        /* Bring-up self-test: paint solid colours straight through the panel
+         * driver before LVGL starts. A visible flash proves the SPI data path
+         * (wiring, CS/DC, clock) works and points any remaining black screen
+         * at the UI layer; no flash at all means the panel is not receiving
+         * commands/data. Byte order is irrelevant here — every colour differs
+         * from black whichever way the two bytes are swapped. */
+        {
+            constexpr int kTestW = PHONE_AV_HW_DISP_WIDTH;
+            constexpr int kTestH = PHONE_AV_HW_DISP_HEIGHT;
+            constexpr size_t kTestPixels = static_cast<size_t>(kTestW) * kTestH;
+            auto* frame = static_cast<uint16_t*>(
+                heap_caps_malloc(kTestPixels * sizeof(uint16_t), MALLOC_CAP_SPIRAM));
+            if (frame == nullptr) {
+                frame = static_cast<uint16_t*>(
+                    heap_caps_malloc(kTestPixels * sizeof(uint16_t), MALLOC_CAP_8BIT));
+            }
+            if (frame != nullptr) {
+                static const uint16_t kColors[] = {0xF800, 0x07E0, 0x001F, 0xFFFF};
+                static const char* kNames[] = {"red", "green", "blue", "white"};
+                for (int i = 0; i < 4; ++i) {
+                    for (size_t p = 0; p < kTestPixels; ++p) {
+                        frame[p] = kColors[i];
+                    }
+                    esp_lcd_panel_draw_bitmap(panel, 0, 0, kTestW, kTestH, frame);
+                    ESP_LOGI(TAG, "LCD self-test: %s", kNames[i]);
+                    vTaskDelay(pdMS_TO_TICKS(400));
+                }
+                heap_caps_free(frame);
+            } else {
+                ESP_LOGW(TAG, "LCD self-test skipped: no frame buffer");
+            }
+        }
 
         hw_display_ = new SpiLcdDisplay(
             panel_io, panel, PHONE_AV_HW_DISP_WIDTH, PHONE_AV_HW_DISP_HEIGHT,
