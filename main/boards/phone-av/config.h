@@ -151,7 +151,9 @@
 #define PHONE_AV_HW_DISP_RGB_ORDER 0
 #endif
 #ifndef PHONE_AV_HW_DISP_SPI_MODE
-#define PHONE_AV_HW_DISP_SPI_MODE 0
+/* Some 1.54" ST7789 modules only latch commands in SPI mode 3 (CPOL=1,
+ * CPHA=1); mode 0 leaves them showing black or garbled pixels. */
+#define PHONE_AV_HW_DISP_SPI_MODE 3
 #endif
 #ifndef PHONE_AV_HW_DISP_PCLK_HZ
 /* 10 MHz is deliberately conservative: ST7789 modules work at 40 MHz on short

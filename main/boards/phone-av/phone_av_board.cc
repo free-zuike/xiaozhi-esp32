@@ -1169,8 +1169,13 @@ private:
                 static const uint16_t kColors[] = {0xF800, 0x07E0, 0x001F, 0xFFFF};
                 static const char* kNames[] = {"red", "green", "blue", "white"};
                 for (int i = 0; i < 4; ++i) {
+                    /* ST7789 expects RGB565 most-significant byte first. Store
+                     * the value byte-swapped so the colours on the panel match
+                     * the names instead of showing shifted hues. */
+                    const uint16_t color =
+                        static_cast<uint16_t>((kColors[i] >> 8) | (kColors[i] << 8));
                     for (size_t p = 0; p < kTestPixels; ++p) {
-                        frame[p] = kColors[i];
+                        frame[p] = color;
                     }
                     esp_lcd_panel_draw_bitmap(panel, 0, 0, kTestW, kTestH, frame);
                     ESP_LOGI(TAG, "LCD self-test: %s", kNames[i]);
