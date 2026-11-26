@@ -151,9 +151,8 @@
 #define PHONE_AV_HW_DISP_RGB_ORDER 0
 #endif
 #ifndef PHONE_AV_HW_DISP_SPI_MODE
-/* This 1.54" module latches commands in mode 0; mode 3 produced only random
- * flicker and no image. */
-#define PHONE_AV_HW_DISP_SPI_MODE 0
+/* Try SPI mode 2 (CPOL=1, CPHA=0) for this 1.54" ST7789 module. */
+#define PHONE_AV_HW_DISP_SPI_MODE 2
 #endif
 #ifndef PHONE_AV_HW_DISP_PCLK_HZ
 /* 10 MHz is deliberately conservative: ST7789 modules work at 40 MHz on short
