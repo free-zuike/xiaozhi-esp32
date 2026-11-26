@@ -142,7 +142,9 @@
 #define PHONE_AV_HW_DISP_SWAP_XY 0
 #endif
 #ifndef PHONE_AV_HW_DISP_INVERT
-#define PHONE_AV_HW_DISP_INVERT 1
+/* 1.54" ST7789 modules vary: with invert enabled this panel showed cyan,
+ * magenta and yellow where red/green/blue were expected. */
+#define PHONE_AV_HW_DISP_INVERT 0
 #endif
 /* 0 = RGB element order, 1 = BGR. */
 #ifndef PHONE_AV_HW_DISP_RGB_ORDER
