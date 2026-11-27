@@ -106,12 +106,10 @@
 #define PHONE_AV_HW_DISP_HEIGHT 240
 #endif
 #ifndef PHONE_AV_HW_DISP_MOSI
-/* Temporary bring-up experiment: swapped with CLK to test whether the two
- * dupont leads are physically crossed on the bench board. */
-#define PHONE_AV_HW_DISP_MOSI GPIO_NUM_38
+#define PHONE_AV_HW_DISP_MOSI GPIO_NUM_12
 #endif
 #ifndef PHONE_AV_HW_DISP_CLK
-#define PHONE_AV_HW_DISP_CLK GPIO_NUM_12
+#define PHONE_AV_HW_DISP_CLK GPIO_NUM_38
 #endif
 #ifndef PHONE_AV_HW_DISP_CS
 #define PHONE_AV_HW_DISP_CS GPIO_NUM_47
@@ -153,8 +151,9 @@
 #define PHONE_AV_HW_DISP_RGB_ORDER 0
 #endif
 #ifndef PHONE_AV_HW_DISP_SPI_MODE
-/* Try SPI mode 2 (CPOL=1, CPHA=0) for this 1.54" ST7789 module. */
-#define PHONE_AV_HW_DISP_SPI_MODE 2
+/* ST7789 modules latch commands in mode 0; modes 2 and 3 produced only random
+ * flicker on the bench board. */
+#define PHONE_AV_HW_DISP_SPI_MODE 0
 #endif
 #ifndef PHONE_AV_HW_DISP_PCLK_HZ
 /* 10 MHz is deliberately conservative: ST7789 modules work at 40 MHz on short

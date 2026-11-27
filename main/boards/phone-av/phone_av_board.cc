@@ -36,6 +36,7 @@
 #include <vector>
 
 #include <driver/spi_common.h>
+#include <esp_attr.h>
 #include <esp_heap_caps.h>
 #include <esp_http_server.h>
 #include <esp_lcd_panel_io.h>
@@ -1088,6 +1089,48 @@ private:
 #if PHONE_AV_HW_DISP_TYPE == 0
         return false;
 #else
+        /* Bring-up experiment: the documented wiring never showed a single
+         * self-test frame, so cycle through the plausible control-line
+         * permutations at each boot. One variant per boot (RTC counter);
+         * whoever is at the bench power-cycles until colours appear and
+         * reports which boot it was. */
+        struct LcdVariant {
+            const char* name;
+            gpio_num_t cs, dc, rst, bl;
+        };
+        static const LcdVariant kVariants[] = {
+            {"standard (cs=47 dc=1 rst=39 bl=40)", GPIO_NUM_47, GPIO_NUM_1,
+             GPIO_NUM_39, GPIO_NUM_40},
+            {"cs<->dc (cs=1 dc=47)", GPIO_NUM_1, GPIO_NUM_47, GPIO_NUM_39,
+             GPIO_NUM_40},
+            {"rst<->bl (rst=40 bl=39)", GPIO_NUM_47, GPIO_NUM_1, GPIO_NUM_40,
+             GPIO_NUM_39},
+            {"no hardware reset (rst=-1)", GPIO_NUM_47, GPIO_NUM_1, GPIO_NUM_NC,
+             GPIO_NUM_40},
+        };
+        /* Track the variant index in NVS: the bench board is power-cycled by
+         * unplugging USB, which wipes RTC memory, so the counter must survive
+         * a cold boot to walk through every variant. */
+        const int variant_count =
+            static_cast<int>(sizeof(kVariants) / sizeof(kVariants[0]));
+        static int s_lcd_variant = 0;
+        {
+            Settings rd(kPhoneAvConfigNs, false);
+            s_lcd_variant = static_cast<int>(rd.GetInt("lcd_bringup", 0));
+        }
+        if (s_lcd_variant < 0 || s_lcd_variant >= variant_count) {
+            s_lcd_variant = 0;
+        }
+        {
+            Settings wr(kPhoneAvConfigNs, true);
+            wr.SetInt("lcd_bringup", (s_lcd_variant + 1) % variant_count);
+        }
+        const LcdVariant& v = kVariants[s_lcd_variant];
+        ESP_LOGW(TAG,
+                 "LCD bring-up variant %d/%d: %s (data pins mosi=%d clk=%d unchanged)",
+                 s_lcd_variant + 1, variant_count, v.name, PHONE_AV_HW_DISP_MOSI,
+                 PHONE_AV_HW_DISP_CLK);
+
         spi_bus_config_t buscfg = {};
         buscfg.mosi_io_num = PHONE_AV_HW_DISP_MOSI;
         buscfg.miso_io_num = GPIO_NUM_NC;
@@ -1105,8 +1148,8 @@ private:
         esp_lcd_panel_io_handle_t panel_io = nullptr;
         esp_lcd_panel_handle_t panel = nullptr;
         esp_lcd_panel_io_spi_config_t io_config = {};
-        io_config.cs_gpio_num = PHONE_AV_HW_DISP_CS;
-        io_config.dc_gpio_num = PHONE_AV_HW_DISP_DC;
+        io_config.cs_gpio_num = v.cs;
+        io_config.dc_gpio_num = v.dc;
         io_config.spi_mode = PHONE_AV_HW_DISP_SPI_MODE;
         io_config.pclk_hz = PHONE_AV_HW_DISP_PCLK_HZ;
         io_config.trans_queue_depth = 10;
@@ -1119,7 +1162,7 @@ private:
         }
 
         esp_lcd_panel_dev_config_t panel_config = {};
-        panel_config.reset_gpio_num = PHONE_AV_HW_DISP_RST;
+        panel_config.reset_gpio_num = v.rst;
         panel_config.rgb_ele_order = PHONE_AV_HW_DISP_RGB_ORDER
                                          ? LCD_RGB_ELEMENT_ORDER_BGR
                                          : LCD_RGB_ELEMENT_ORDER_RGB;
@@ -1191,9 +1234,8 @@ private:
             panel_io, panel, PHONE_AV_HW_DISP_WIDTH, PHONE_AV_HW_DISP_HEIGHT,
             PHONE_AV_HW_DISP_OFFSET_X, PHONE_AV_HW_DISP_OFFSET_Y, PHONE_AV_HW_DISP_MIRROR_X,
             PHONE_AV_HW_DISP_MIRROR_Y, PHONE_AV_HW_DISP_SWAP_XY);
-        if (PHONE_AV_HW_DISP_BL != GPIO_NUM_NC) {
-            backlight_ =
-                new PwmBacklight(PHONE_AV_HW_DISP_BL, !PHONE_AV_HW_DISP_BL_ACTIVE_HIGH);
+        if (v.bl != GPIO_NUM_NC) {
+            backlight_ = new PwmBacklight(v.bl, !PHONE_AV_HW_DISP_BL_ACTIVE_HIGH);
             backlight_->RestoreBrightness();
         }
         ESP_LOGI(TAG, "Local LCD ready (%dx%d, type=%d)", PHONE_AV_HW_DISP_WIDTH,
