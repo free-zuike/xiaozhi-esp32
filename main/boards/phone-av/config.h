@@ -106,10 +106,12 @@
 #define PHONE_AV_HW_DISP_HEIGHT 240
 #endif
 #ifndef PHONE_AV_HW_DISP_MOSI
-#define PHONE_AV_HW_DISP_MOSI GPIO_NUM_12
+/* Temporary bring-up experiment: swapped with CLK to test whether the two
+ * dupont leads are physically crossed on the bench board. */
+#define PHONE_AV_HW_DISP_MOSI GPIO_NUM_38
 #endif
 #ifndef PHONE_AV_HW_DISP_CLK
-#define PHONE_AV_HW_DISP_CLK GPIO_NUM_38
+#define PHONE_AV_HW_DISP_CLK GPIO_NUM_12
 #endif
 #ifndef PHONE_AV_HW_DISP_CS
 #define PHONE_AV_HW_DISP_CS GPIO_NUM_47
