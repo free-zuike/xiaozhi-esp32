@@ -36,6 +36,7 @@
 #include <vector>
 
 #include <driver/spi_common.h>
+#include <driver/gpio.h>
 #include <esp_attr.h>
 #include <esp_heap_caps.h>
 #include <esp_http_server.h>
@@ -343,7 +344,8 @@ std::string PhoneAvConfigPage(const std::string& message) {
         "</div>"
         "<p class=\"hint\">默认关闭自动对话和播放时开麦：不会在没人时自己开聊，也不会听到自己的 TTS 后自问自答。开启“播放时开麦”才能打断，但可能出现自问自答。</p>"
         "<button type=\"submit\">保存并重启</button></form>"
-        "<p><a href=\"/test_speaker\" target=\"_blank\">测试喇叭（1kHz 2 秒）</a></p>";
+        "<p><a href=\"/test_speaker\" target=\"_blank\">测试喇叭（1kHz 2 秒）</a>　"
+        "<a href=\"/wire_test\" target=\"_blank\">LCD 信号线测试</a></p>";
     if (!message.empty()) {
         html += "<p><b>" + message + "</b></p>";
     }
@@ -623,6 +625,142 @@ esp_err_t PhoneAvTestSpeakerHandler(httpd_req_t* req) {
     return httpd_resp_send(req, "playing 1kHz for 2s", HTTPD_RESP_USE_STRLEN);
 }
 
+/* Signal-wire continuity test. The six LCD signal GPIOs are reconfigured as
+ * inputs with pull-ups; touching the far end of a wire to GND must pull its
+ * pin low. A pin that never reads low marks a broken wire, a bad crimp or an
+ * unusable GPIO — the two failure modes an SPI display cannot report back.
+ * The panel is left uninitialised until the next reboot. */
+struct PhoneAvWireTest {
+    static constexpr int kPinCount = 6;
+    std::mutex mutex;
+    bool running = false;
+    int64_t end_us = 0;
+    gpio_num_t pins[kPinCount] = {GPIO_NUM_12, GPIO_NUM_38, GPIO_NUM_47,
+                                  GPIO_NUM_1, GPIO_NUM_39, GPIO_NUM_40};
+    const char* names[kPinCount] = {"SDA(GPIO12)", "SCL(GPIO38)", "CS(GPIO47)",
+                                    "DC(GPIO1)",  "RST(GPIO39)", "BL(GPIO40)"};
+    int level[kPinCount] = {};
+    bool ever_low[kPinCount] = {};
+};
+
+static PhoneAvWireTest g_wire_test;
+
+static void PhoneAvWireTestTask(void*) {
+    auto& st = g_wire_test;
+    for (int i = 0; i < PhoneAvWireTest::kPinCount; ++i) {
+        gpio_reset_pin(st.pins[i]);
+        gpio_set_direction(st.pins[i], GPIO_MODE_INPUT);
+        gpio_set_pull_mode(st.pins[i], GPIO_PULLUP_ONLY);
+    }
+    const int64_t end = esp_timer_get_time() + 120LL * 1000000LL;
+    {
+        std::lock_guard<std::mutex> lock(st.mutex);
+        st.running = true;
+        st.end_us = end;
+        for (int i = 0; i < PhoneAvWireTest::kPinCount; ++i) {
+            st.level[i] = 1;
+            st.ever_low[i] = false;
+        }
+    }
+    while (esp_timer_get_time() < end) {
+        for (int i = 0; i < PhoneAvWireTest::kPinCount; ++i) {
+            const int level = gpio_get_level(st.pins[i]);
+            std::lock_guard<std::mutex> lock(st.mutex);
+            st.level[i] = level;
+            if (level == 0) {
+                st.ever_low[i] = true;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    {
+        std::lock_guard<std::mutex> lock(st.mutex);
+        st.running = false;
+    }
+    vTaskDelete(nullptr);
+}
+
+esp_err_t PhoneAvWireTestStateHandler(httpd_req_t* req) {
+    auto& st = g_wire_test;
+    std::string json = "{";
+    {
+        std::lock_guard<std::mutex> lock(st.mutex);
+        int64_t now = esp_timer_get_time();
+        int seconds_left = static_cast<int>((st.end_us - now) / 1000000);
+        if (seconds_left < 0) {
+            seconds_left = 0;
+        }
+        json += "\"running\":" + std::string(st.running ? "true" : "false");
+        json += ",\"seconds_left\":" + std::to_string(seconds_left);
+        json += ",\"pins\":[";
+        for (int i = 0; i < PhoneAvWireTest::kPinCount; ++i) {
+            if (i > 0) {
+                json += ",";
+            }
+            json += "{\"name\":\"" + std::string(st.names[i]) + "\"";
+            json += ",\"level\":" + std::to_string(st.level[i]);
+            json += ",\"ever_low\":" + std::string(st.ever_low[i] ? "true" : "false");
+            json += "}";
+        }
+        json += "]}";
+    }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json.c_str(), HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t PhoneAvWireTestHandler(httpd_req_t* req) {
+    auto& st = g_wire_test;
+    {
+        std::lock_guard<std::mutex> lock(st.mutex);
+        if (!st.running) {
+            for (int i = 0; i < PhoneAvWireTest::kPinCount; ++i) {
+                st.level[i] = 1;
+                st.ever_low[i] = false;
+            }
+            if (xTaskCreate(PhoneAvWireTestTask, "wire_test", 4096, nullptr, 4,
+                            nullptr) != pdPASS) {
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                                    "failed to start test task");
+                return ESP_FAIL;
+            }
+        }
+    }
+    std::string html =
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        "<title>LCD 信号线测试</title><style>"
+        "body{font-family:sans-serif;max-width:480px;margin:40px auto;padding:0 16px;line-height:1.6}"
+        "table{border-collapse:collapse;width:100%}"
+        "td,th{border:1px solid #999;padding:6px;text-align:left}"
+        ".low{color:#0a0;font-weight:bold}.high{color:#999}"
+        ".warn{color:#b00;font-size:13px}</style></head><body>"
+        "<h2>LCD 信号线测试（120 秒）</h2>"
+        "<p>逐根操作：把一根杜邦线的<b>屏幕端插头拔下来</b>，用它的金属头碰一下"
+        "模块的 <b>GND 引脚</b>，对应那一行应变绿并显示「已测通」。</p>"
+        "<p>测试期间每 0.1 秒采样一次，哪一行始终不变绿，哪根线（或那个 GPIO）就有问题。</p>"
+        "<table id=\"t\"><tr><th>信号</th><th>当前电平</th><th>结果</th></tr></table>"
+        "<p id=\"left\"></p>"
+        "<p class=\"warn\">测试结束后屏幕功能暂停，重启板子一次恢复。</p>"
+        "<p><a href=\"/\">返回设置页</a></p>"
+        "<script>"
+        "function refresh(){fetch('/wire_test_state',{cache:'no-store'})"
+        ".then(r=>r.json()).then(d=>{"
+        "const t=document.getElementById('t');"
+        "while(t.rows.length>1)t.deleteRow(1);"
+        "d.pins.forEach(p=>{const row=t.insertRow(-1);"
+        "row.insertCell(0).textContent=p.name;"
+        "row.insertCell(1).textContent=p.level===1?'高':'低';"
+        "const c=row.insertCell(2);"
+        "c.textContent=p.ever_low?'已测通 ✓':'未测通 ✗';"
+        "c.className=p.ever_low?'low':'high';});"
+        "document.getElementById('left').textContent="
+        "(d.running?('剩余 '+d.seconds_left+' 秒'):'测试已结束');"
+        "}).catch(()=>{});}"
+        "setInterval(refresh,500);refresh();</script></body></html>";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, html.c_str(), HTTPD_RESP_USE_STRLEN);
+}
+
 void StartPhoneAvConfigServer() {
     static std::atomic<bool> started{false};
     if (started.exchange(true)) {
@@ -634,7 +772,7 @@ void StartPhoneAvConfigServer() {
     // more stack than the 4 KB httpd default; otherwise the httpd task overflows
     // and the board reboots in a loop right after connecting to WiFi.
     config.stack_size = 16 * 1024;
-    config.max_uri_handlers = 8;
+    config.max_uri_handlers = 10;
     // The WiFi config-AP server uses the httpd default ctrl_port (32768).
     // Give this second httpd instance its own control port so the 8080 page
     // also works while the captive portal is active.
@@ -677,6 +815,16 @@ void StartPhoneAvConfigServer() {
         .handler = PhoneAvTestSpeakerHandler, .user_ctx = nullptr,
     };
     httpd_register_uri_handler(server, &test_uri);
+    httpd_uri_t wire_test_uri = {
+        .uri = "/wire_test", .method = HTTP_GET,
+        .handler = PhoneAvWireTestHandler, .user_ctx = nullptr,
+    };
+    httpd_register_uri_handler(server, &wire_test_uri);
+    httpd_uri_t wire_state_uri = {
+        .uri = "/wire_test_state", .method = HTTP_GET,
+        .handler = PhoneAvWireTestStateHandler, .user_ctx = nullptr,
+    };
+    httpd_register_uri_handler(server, &wire_state_uri);
 
     esp_netif_t* netif = esp_netif_get_default_netif();
     esp_netif_ip_info_t info{};
